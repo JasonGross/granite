@@ -1,0 +1,5 @@
+(coq.theory
+ (package granite)
+ (name granite.app)
+ (theories stdpp Ltac2 RecordUpdate granite.core quartz.lang)
+)

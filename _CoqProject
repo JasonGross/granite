@@ -1,0 +1,6 @@
+-Q _build/default/core granite.core
+-Q _build/default/app granite.app
+-Q _build/default/isaSpec granite.isaSpec
+-Q _build/default/quartz/lang quartz.lang
+-Q _build/default/quartz/examples quartz.examples
+-Q ../coqutil/src/coqutil coqutil

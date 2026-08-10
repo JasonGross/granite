@@ -1,0 +1,4 @@
+[submodule "quartz"]
+	path = quartz
+	url = https://github.com/mit-plv/quartz
+	branch = stellal/stdpp
