@@ -1,27 +1,35 @@
 From stdpp Require Import base finite list options strings stringmap.
-From stdpp Require Import bitvector.definitions.
+From granite.core Require Import Bits.
 Require Import Stdlib.Logic.FunctionalExtensionality.
 From granite Require Import Tactics.
 
 From quartz.lang Require Syntax domain.
 Section Quartz.
-  Import domain.BV.
+  Import domain.Zmod.
   Lemma embed_bool_false :
-    embed_bool false = Z_to_bv 1 0. 
+    embed_bool false = 0%Zmod.
   Proof.
-    apply bv_eq. reflexivity.
+    apply Zmod.unsigned_inj. reflexivity.
   Qed.
   Lemma embed_bool_true:
-    embed_bool true = Z_to_bv 1 1. 
+    embed_bool true = 1%Zmod.
   Proof.
-    apply bv_eq. reflexivity.
+    apply Zmod.unsigned_inj. reflexivity.
   Qed.
+  Lemma unsigned_embed_bool b :
+    Zmod.unsigned (embed_bool b) = Z.b2z b.
+  Proof. destruct b; reflexivity. Qed.
+  Lemma not_embed_bool b :
+    Zmod.not (embed_bool b) = embed_bool (negb b).
+  Proof. apply Zmod.unsigned_inj. destruct b; reflexivity. Qed.
 
 End Quartz.
 
 Create HintDb bits.
 Hint Rewrite embed_bool_true : bits.
 Hint Rewrite embed_bool_false : bits.
+Hint Rewrite zeroes_zero : bits.
+Hint Rewrite unsigned_literal : bits.
 
 Section Option.
   Definition is_some {A} (mx: option A) :=

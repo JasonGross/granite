@@ -107,15 +107,15 @@ Section WithContext.
     split; cbn; intros *.
     - cbn in *. fifosimp. cbn in *.
       destruct Rel_base0. 
-      destruct (BV.bool_cases b) eqn:?;
+      destruct (Zmod.bool_cases z) eqn:?;
         destruct vmethod; cbn in *; simplify_tupless; auto;
         try rewrite<-surjective_pairing; auto; f_equal;
         case_match_in spec_st_rel0 eqn:s2val; cbn; propositional; auto; try rewrite_solve; try done.
     - cbn in *. fifosimp. cbn in *.
       destruct Rel_base0.
-      destruct (BV.bool_cases b0) eqn:?; cbn in *;
+      destruct (Zmod.bool_cases z0) eqn:?; cbn in *;
         case_match_in spec_st_rel0 eqn:s2val; propositional; try discriminate;
-        destruct method; simpl in *; cbn in *; cbv[BV.nonzero eexpr.LetBlock] in *;
+        destruct method; simpl in *; cbn in *; cbv[Zmod.nonzero eexpr.LetBlock] in *;
         bash_destruct H; try discriminate; unfold evalITrace in *.
       all: eexists; split; [reflexivity | ]; auto;
         repeat constructor; cbn; repeat simpl_match; auto;

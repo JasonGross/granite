@@ -1,5 +1,5 @@
 From stdpp Require Import base.
-From stdpp.bitvector Require Import definitions.
+From granite.core Require Import Bits.
 From granite.core Require Import
   Program.
 From granite.app Require Import BhtAPI.
@@ -9,7 +9,7 @@ Section WithContext.
   Definition trace_t := list (ActionMethod unit).
   
   Class BhtSpec_sig :=
-  { ppcDP: trace_t -> bv addr_sz -> bv addr_sz -> bv addr_sz}.
+  { ppcDP: trace_t -> bits addr_sz -> bits addr_sz -> bits addr_sz}.
   
   Context {bhtSpecParams: BhtSpec_sig}.
 

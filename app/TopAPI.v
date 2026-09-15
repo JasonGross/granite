@@ -1,5 +1,5 @@
 From stdpp Require Import base finite nmap.
-From stdpp.bitvector Require Import definitions.
+From granite.core Require Import Bits.
 From RecordUpdate Require Import RecordSet.
 From granite.core Require Import
   Bits 

@@ -1,6 +1,6 @@
 (* Memory *)
 From stdpp Require Import base finite nmap.
-From stdpp.bitvector Require Import definitions.
+From granite.core Require Import Bits.
 From granite.core Require Import
   Array
   Pair
@@ -10,8 +10,8 @@ From granite.core Require Import
   Reg.
 
 Section API.
-  Context {width : N}.
-  Notation data_t := (bv width).
+  Context {width : Z}.
+  Notation data_t := (bits width).
   Inductive ActionMethod : Type -> Type :=
   | Store (idx: N) (value: data_t) : ActionMethod unit.
 
@@ -23,8 +23,8 @@ Arguments ActionMethod : clear implicits.
 Arguments ValueMethod: clear implicits.
 
 Section WithContext.
-  Context {width: N}.
-  Notation data_t := (bv width).
+  Context {width : Z}.
+  Notation data_t := (bits width).
   Definition MemSt := Nmap data_t.
 
   Definition mem_load (mem: MemSt) (addr: N) : data_t :=

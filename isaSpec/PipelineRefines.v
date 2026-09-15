@@ -25,7 +25,7 @@ From granite.app Require Import
   BtbAPI
   BtbSpec.
 From quartz.lang Require Syntax domain.
-Import domain.BV.
+Import domain.Zmod.
 From granite.isaSpec Require Pipelined PipelineRefinesBase.
 Set Nested Proofs Allowed.
 Ltac fast_cleanup :=
@@ -108,7 +108,7 @@ Tactic Notation "match_innermost_in_hyp" ident(H1) "as" ident(H2) :=
     end
   end; subst; try congruence; eauto.
 
-Notation bit := (bv 1).
+Notation bit := (bits 1).
 Import PipelineRefinesBase.PipelineRefines.
 
 Module PipelineRefines : PipelineRefinesBase.PipelineRefinesSig.
@@ -340,7 +340,7 @@ Module PipelineRefines : PipelineRefinesBase.PipelineRefinesSig.
 
        Definition impl_writeReg
          (impl: impl_rf_t)
-         (idx: bv LOG_NREGS) (value: mword)
+         (idx: bits LOG_NREGS) (value: mword)
          : impl_rf_t :=
          snd (EvalMethod rfScoredSpec (RfScored.WriteAndRelease idx value) impl).
 
@@ -687,7 +687,7 @@ Module PipelineRefines : PipelineRefinesBase.PipelineRefinesSig.
                (exists req,
                  MultiplierSpec.reqs (Mul implSt) = [req] /\
                  RfRel (impl_writeReg (CPU.Rf implSt) (circuitDefs.D_rdIdx flds)
-                                      (bv_extract 0 WIDTH (MultiplierSpec.handle_req req))) (SingleCycle.Rf specSemSt)
+                                      (Zmod.firstn WIDTH (MultiplierSpec.handle_req req))) (SingleCycle.Rf specSemSt)
                )
            )
            (pfOther: 
@@ -941,7 +941,7 @@ Module PipelineRefines : PipelineRefinesBase.PipelineRefinesSig.
          cbv[RfRel RfScored.read registerFile.readReg Register]. 
          intros. case_decide; subst; auto; cbn.
          destruct_match_pairs. simpl. simpl in Heqr.
-         replace b0 with (snd (b, b0)) by auto. rewrite<-Heqr.
+         replace z0 with (snd (z, z0)) by auto. rewrite<-Heqr.
          setoid_rewrite<-vlookup_map with (f := snd). reflexivity.
        Qed.
        Lemma SimInit:
@@ -1032,12 +1032,12 @@ Set Printing Coercions.
 Lemma e2w_isMMIO_sim:
   forall implSt pubSt x ,
   PubSim implSt pubSt ->
-  bv_and (embed_bool (is_some (Fifo1Spec.opt_val (E2w implSt)))) 
+  Zmod.and (embed_bool (is_some (Fifo1Spec.opt_val (E2w implSt)))) 
   (e2w_isMMIO
     (default
       (Fifo1Spec.default_first (SpecParams := fifo1_e2w fifoSpecs) (Fifo1Spec.hist (E2w implSt)))
        (Fifo1Spec.opt_val (E2w implSt)))) =
-  (bv_and (embed_bool (is_some (Fifo1Spec.opt_val (E2w implSt)))) 
+  (Zmod.and (embed_bool (is_some (Fifo1Spec.opt_val (E2w implSt)))) 
   (e2w_isMMIO (default x (Fifo1Spec.opt_val (E2w pubSt))))).
 Proof.
   intros * hsim.
@@ -1045,11 +1045,7 @@ Proof.
   pose proof (PubSim_e2w _ _ PubSim_cpu0) as he2w. cbv[E2wPubSim] in *.
   destruct (Fifo1Spec.opt_val (E2w implSt)) eqn:he2w_some; cbn; auto.
   specialize he2w with (1 := eq_refl). propositional. 
-  setoid_rewrite he2w2. rewrite_solve. 
-  rewrite embed_bool_false.
-  apply bv_eq. repeat rewrite bv_and_unsigned. repeat rewrite Z_to_bv_unsigned.
-  repeat rewrite bv_wrap_small by (unfold bv_modulus; lia).
-  auto.
+  setoid_rewrite he2w2. rewrite_solve.
 Qed.
 
 
@@ -1523,7 +1519,7 @@ Set Printing Coercions.
   forall x,
   (isZero (embed_bool x)) = negb x.
 Proof.
-  intros. apply bv_eq.
+  intros. apply Zmod.unsigned_inj.
   destruct x; auto. 
 Qed.
        
@@ -1565,8 +1561,8 @@ Qed.
 Hint Rewrite iszero_embed : Bool.
 Hint Rewrite nonzero_iszero: Bool.
 Lemma nonzero_bv_and_true:
-  forall (x y: bv 1),
-  nonzero (bv_and x y) = true <->
+  forall (x y: bits 1),
+  nonzero (Zmod.and x y) = true <->
   nonzero x = true /\ nonzero y = true.   
 Proof.
   intros; split; propositional;
@@ -1576,18 +1572,18 @@ Hint Rewrite nonzero_bv_and_true : Bool.
 Hint Rewrite nonzero_bool : Bool.
 Lemma bv_and_embed_true_l:
   forall x,
- bv_and (embed_bool true) x = x.
+ Zmod.and (embed_bool true) x = x.
 Proof.
   intros. 
-  apply bv_eq. 
+  apply Zmod.unsigned_inj. 
   destruct (bool_cases x); auto.
 Qed.
 Lemma bv_and_embed_true_r:
   forall x,
- bv_and x (embed_bool true) = x.
+ Zmod.and x (embed_bool true) = x.
 Proof.
   intros. 
-  apply bv_eq. 
+  apply Zmod.unsigned_inj. 
   destruct (bool_cases x); auto.
 Qed.
 Hint Rewrite bv_and_embed_true_l : Bool.
@@ -2180,8 +2176,8 @@ Hint Rewrite nonzero_bool : Bool.
        Lemma acquireLockSimEq:
          forall rf1 rf1' rf2 rf2' idx,
          vmap fst rf1 = vmap fst rf2 ->
-         evalProg (RfScored.base (initVal := bv_0 WIDTH) (log_nregs := LOG_NREGS)) (RfScored.acquireLock idx) rf1 = ((), rf1') ->
-         evalProg (RfScored.base (initVal := bv_0 WIDTH)) (RfScored.acquireLock idx) rf2 = ((), rf2') ->
+         evalProg (RfScored.base (initVal := (zeroes : bits WIDTH)) (log_nregs := LOG_NREGS)) (RfScored.acquireLock idx) rf1 = ((), rf1') ->
+         evalProg (RfScored.base (initVal := (zeroes : bits WIDTH))) (RfScored.acquireLock idx) rf2 = ((), rf2') ->
          vmap fst rf1' = vmap fst rf2'.
        Proof.
          intros. apply vec_eq.
@@ -2194,8 +2190,8 @@ Hint Rewrite nonzero_bool : Bool.
        Lemma releaseLockSimEq:
          forall rf1 rf1' rf2 rf2' idx,
          vmap fst rf1 = vmap fst rf2 ->
-         evalProg (RfScored.base (initVal := bv_0 WIDTH) (log_nregs := LOG_NREGS)) (RfScored.releaseLock idx) rf1 = ((), rf1') ->
-         evalProg (RfScored.base (initVal := bv_0 WIDTH)) (RfScored.releaseLock idx) rf2 = ((), rf2') ->
+         evalProg (RfScored.base (initVal := (zeroes : bits WIDTH)) (log_nregs := LOG_NREGS)) (RfScored.releaseLock idx) rf1 = ((), rf1') ->
+         evalProg (RfScored.base (initVal := (zeroes : bits WIDTH))) (RfScored.releaseLock idx) rf2 = ((), rf2') ->
          vmap fst rf1' = vmap fst rf2'.
        Proof.
          simpl. intros. destruct_match_pairs. simpl in *. simplify_tupless.
@@ -2227,11 +2223,11 @@ Hint Rewrite nonzero_bool : Bool.
        Lemma releaseLock_neq_unchanged:
          forall rf rf' idx idx2,
          idx <> idx2 ->
-         evalProg (RfScored.base (initVal:=bv_0 WIDTH))
+         evalProg (RfScored.base (initVal:=(zeroes : bits WIDTH)))
            (RfScored.releaseLock idx) rf = ((), rf') ->
-         evalExpr (RfScored.base (initVal:=bv_0 WIDTH))
+         evalExpr (RfScored.base (initVal:=(zeroes : bits WIDTH)))
            (RfScored.isLocked idx2) rf' =
-         evalExpr (RfScored.base (initVal:=bv_0 WIDTH) (log_nregs := LOG_NREGS))
+         evalExpr (RfScored.base (initVal:=(zeroes : bits WIDTH)) (log_nregs := LOG_NREGS))
            (RfScored.isLocked idx2) rf. 
        Proof.
          intros. simpl in *. destruct_match_pairs. simpl in *. simplify_tupless. 
@@ -2242,7 +2238,7 @@ Hint Rewrite nonzero_bool : Bool.
        Lemma rfRel_releaseLock:
          forall implRf specRf idx implRf',
          RfRel implRf specRf ->
-         evalProg (RfScored.base (initVal := bv_0 WIDTH))
+         evalProg (RfScored.base (initVal := (zeroes : bits WIDTH)))
                   (RfScored.releaseLock idx) implRf = ((), implRf') ->
          RfRel implRf' specRf.
        Proof.
@@ -2263,17 +2259,17 @@ Hint Rewrite nonzero_bool : Bool.
        Qed.
        Lemma rf_writeAndRelease_neq_stillLocked:
          forall implRf implRf' idx idx' value,
-         evalProg (RfScored.base (initVal := bv_0 WIDTH) (log_nregs := LOG_NREGS))
+         evalProg (RfScored.base (initVal := (zeroes : bits WIDTH)) (log_nregs := LOG_NREGS))
                   (RfScored.writeAndRelease idx value) implRf = ((), implRf') -> 
          idx <> idx' ->
-         evalExpr (RfScored.base (initVal := bv_0 WIDTH) (log_nregs := LOG_NREGS))
+         evalExpr (RfScored.base (initVal := (zeroes : bits WIDTH)) (log_nregs := LOG_NREGS))
                   (RfScored.isLocked idx') implRf' = 
-         evalExpr (RfScored.base (initVal := bv_0 WIDTH) (log_nregs := LOG_NREGS))
+         evalExpr (RfScored.base (initVal := (zeroes : bits WIDTH)) (log_nregs := LOG_NREGS))
                   (RfScored.isLocked idx') implRf.
        Proof.
          simpl. intros.
          destruct_match_pairs; simpl in *.
-         destruct (bool_cases b); autorewrite with Bool in *; simpl in *; solve_rfRel.
+         destruct (bool_cases z); autorewrite with Bool in *; simpl in *; solve_rfRel.
          setoid_rewrite vlookup_insert_ne in Heqr0.
          2: { by apply encode_fin_neq. }
          setoid_rewrite Heqr0 in Heqr1. by simplify_tupless.
@@ -2282,9 +2278,9 @@ Hint Rewrite nonzero_bool : Bool.
        Lemma RfRel_writeAndRelease:
          forall implRf specRf implRf' idx value,
          RfRel implRf specRf ->
-         evalProg (RfScored.base (initVal := bv_0 WIDTH) (log_nregs := LOG_NREGS))
+         evalProg (RfScored.base (initVal := (zeroes : bits WIDTH)) (log_nregs := LOG_NREGS))
                   (RfScored.writeAndRelease idx value) implRf = ((), implRf') -> 
-         evalExpr (RfScored.base (initVal := bv_0 WIDTH) (log_nregs := LOG_NREGS))
+         evalExpr (RfScored.base (initVal := (zeroes : bits WIDTH)) (log_nregs := LOG_NREGS))
                   (RfScored.isLocked idx) implRf = true ->
          RfRel implRf' (registerFile.writeReg idx value specRf).   
        Proof.
@@ -2292,7 +2288,7 @@ Hint Rewrite nonzero_bool : Bool.
          simpl in *. destruct_match_pairs. cbv[RfRel] in *.
          intros. specialize hrel with (idx := idx0);
          cbv[RfScored.read registerFile.readReg registerFile.writeReg Register] in *.
-         destruct (bool_cases b); autorewrite with Bool in *; simpl in *; solve_rfRel; simpl in *; case_decide; auto; try discriminate.
+         destruct (bool_cases z); autorewrite with Bool in *; simpl in *; solve_rfRel; simpl in *; case_decide; auto; try discriminate.
          simpl in *.
          destruct (decide (idx = idx0)); subst.
          - setoid_rewrite vlookup_insert. auto. 
@@ -2315,16 +2311,16 @@ Hint Rewrite nonzero_bool : Bool.
        Lemma writeAndReleaseSimEq :
          forall rf1 rf1' rf2 rf2' idx value1 value2,
          vmap fst rf1 = vmap fst rf2 ->
-         evalProg (RfScored.base (initVal := bv_0 WIDTH) (log_nregs := LOG_NREGS)) (RfScored.writeAndRelease idx value1) rf1 = ((), rf1') ->
-         evalProg (RfScored.base (initVal := bv_0 WIDTH)) (RfScored.writeAndRelease idx value2) rf2 = ((), rf2') ->
+         evalProg (RfScored.base (initVal := (zeroes : bits WIDTH)) (log_nregs := LOG_NREGS)) (RfScored.writeAndRelease idx value1) rf1 = ((), rf1') ->
+         evalProg (RfScored.base (initVal := (zeroes : bits WIDTH))) (RfScored.writeAndRelease idx value2) rf2 = ((), rf2') ->
          vmap fst rf1' = vmap fst rf2'.
        Proof.
          cbv[RfScored.writeAndRelease].
          simpl. intros. destruct_match_pairs. simpl in *. simplify_tupless.
          apply vec_eq. intros. 
-         assert (b1 = fst (rf1 !!! encode_fin idx)).
+         assert (z1 = fst (rf1 !!! encode_fin idx)).
          { setoid_rewrite Heqr0. auto. }
-         assert (b = fst (rf2 !!! encode_fin idx)).
+         assert (z = fst (rf2 !!! encode_fin idx)).
          { setoid_rewrite Heqr. auto. }
          subst. setoid_rewrite<-vlookup_map in H0.
          setoid_rewrite<-vlookup_map in H1.
@@ -2368,7 +2364,7 @@ Hint Rewrite nonzero_bool : Bool.
        Lemma RfRel_writeReg:
          forall implRf specRf idx value value',
          RfRel implRf specRf ->
-         evalExpr (RfScored.base (initVal := bv_0 WIDTH))
+         evalExpr (RfScored.base (initVal := (zeroes : bits WIDTH)))
                   (RfScored.isLocked idx) implRf = true ->
          value = value' ->
          RfRel (impl_writeReg implRf idx value)
@@ -2397,8 +2393,8 @@ Hint Rewrite nonzero_bool : Bool.
        Lemma unlocked_sim: 
          forall implSt specSt idx,
          RelStages' implSt specSt ->
-         evalExpr (RfScored.base (initVal:=bv_0 WIDTH))(RfScored.isLocked idx) (Rf implSt) = false ->
-         evalExpr (RfScored.base (initVal := bv_0 WIDTH)) (RfScored.read (initVal := zeroes) idx) (Rf implSt) =
+         evalExpr (RfScored.base (initVal:=(zeroes : bits WIDTH)))(RfScored.isLocked idx) (Rf implSt) = false ->
+         evalExpr (RfScored.base (initVal := (zeroes : bits WIDTH))) (RfScored.read (initVal := zeroes) idx) (Rf implSt) =
            registerFile.readReg idx (SingleCycle.Rf specSt).
        Proof.
          intros * hstages hlocked. 
@@ -2407,7 +2403,7 @@ Hint Rewrite nonzero_bool : Bool.
          | _ => cbv[NoE2w WBPipelineOk] in *; propositional
          end.
          destruct (e2w_exnInfo ie2w) eqn:?; destruct_pairs; basic_specialize. 
-         destruct (bool_cases b); propositional.
+         destruct (bool_cases z); propositional.
          - specialize pfExn with (1 := eq_refl); propositional.
          - clear pfExn. 
            specialize pfMem with (1 := eq_refl).
@@ -2547,23 +2543,23 @@ Ltac simp_embed :=
       rewrite nonzero_bool in H
   end.
  Lemma neq_zeroes:
-  forall n (x: bv n),
-  ((bv_unsigned x) =? 0)%Z = false <->
+  forall n (x: bits n),
+  ((Zmod.unsigned x) =? 0)%Z = false <->
   x <> zeroes.
 Proof.
-  intros. split; propositional; try apply bv_neq; try apply bv_neq in H.
-  all: try rewrite<-Z.eqb_neq in *; unfold zeroes in *; try rewrite bv_0_unsigned in *.
-  all: auto.
+  intros. rewrite Z.eqb_neq. split.
+  - intros H Heq. apply H. subst x. reflexivity.
+  - intros H Heq. apply H, Zmod.unsigned_inj. exact Heq.
 Qed.
  Lemma neq_zeroes':
-  forall n (x: bv n),
-  negb ((bv_unsigned x) =? 0)%Z = false <->
+  forall n (x: bits n),
+  negb ((Zmod.unsigned x) =? 0)%Z = false <->
   ¬ x <> zeroes.
 Proof.
   intros. rewrite<-neq_zeroes.
   unfold not. rewrite negb_false_iff.
   split; propositional; try congruence.
-  destruct (bv_unsigned x =? 0)%Z; auto.
+  destruct (Zmod.unsigned x =? 0)%Z; auto.
 Qed.
         Lemma negb_eq_false:
           forall b,
@@ -2614,7 +2610,7 @@ Qed.
         Qed.
          Lemma bv_not_eq_false:
           forall (b: bit) ,
-          b = bv_not b <-> False.
+          b = Zmod.not b <-> False.
         Proof.
           intros; destruct (bool_cases b); simpl; propositional; done.
         Qed.
@@ -2629,21 +2625,21 @@ Qed.
         pose proof (IsaParams.validIsaParams isMMIOAddr inst) as validParams; simpl in validParams; simp_bools; repeat simpl_match; propositional; try congruence.
  Lemma nonzero_bv_or :
   forall (x y: bit),
-  nonzero (bv_or x y) =
+  nonzero (Zmod.or x y) =
   nonzero x || nonzero y.
 Proof.
   intros. destruct (bool_cases x); destruct (bool_cases y); auto.
 Qed.
 Lemma nonzero_bv_and :
   forall (x y: bit),
-  nonzero (bv_and x y) =
+  nonzero (Zmod.and x y) =
   nonzero x && nonzero y.
 Proof.
   intros. destruct (bool_cases x); destruct (bool_cases y); auto.
 Qed.
 Lemma nonzero_bv_not :
   forall (x : bit),
-  nonzero (bv_not x) =
+  nonzero (Zmod.not x) =
   negb (nonzero x).
 Proof.
   intros. destruct (bool_cases x);reflexivity.
@@ -2710,7 +2706,7 @@ Ltac assert_hyp_exists H :=
           | H: ?x = _, H1: ?x = _ |- _ => rewrite H in H1; subst; try discriminate
           | H: Mip ?implSt = embed_bool true, 
             H2: _ = PubInput_interruptValid _,
-            H1: (bv_unsigned (customCSRs.readCsr CSR_mie ?implCsrs) =? 0)%Z = false,
+            H1: (Zmod.unsigned (customCSRs.readCsr CSR_mie ?implCsrs) =? 0)%Z = false,
             H3: ?implCsrs = SingleCycle.Csrs ?specSt
              |- _ =>
               match type of hspecStep with
@@ -2788,10 +2784,10 @@ Ltac assert_hyp_exists H :=
           apply rfRel_releaseLock with (1 := H) (2 := H1)
         | H : embed_bool _ = embed_bool _ |- _ => apply embed_bool_inj in H
         | H: ?x = _, H1: ?x = _ |- _ => rewrite H in H1
-        | H1: ?x = ?y, H2: ?x = bv_not ?y |- _ => rewrite H1 in H2
+        | H1: ?x = ?y, H2: ?x = Zmod.not ?y |- _ => rewrite H1 in H2
         | H1: ?x = ?y, H2: ?x = negb ?y |- _ => rewrite H1 in H2
         | H: ?x = negb ?y |- _ => apply negb_eq_false in H; done
-        | H: ?x = bv_not ?y |- _ => apply bv_not_eq_false in H; done
+        | H: ?x = Zmod.not ?y |- _ => apply bv_not_eq_false in H; done
         | |- RelStages _ _ => constructor
         | |- RelStages' _ _ => apply CaseStepLeak
         | |- E2w _ => cbv [E2w] 
@@ -3006,7 +3002,7 @@ Ltac wb_start_no_interrupt H :=
            auto.
          Qed.
          Lemma ones_neq_zeroes:
-           ones WIDTH = bv_0 WIDTH <-> False.
+           (Zmod.opp Zmod.one : bits WIDTH) = (zeroes : bits WIDTH) <-> False.
          Proof.
            split; propositional. discriminate.
          Qed.
@@ -3195,14 +3191,15 @@ Ltac wb_start_no_interrupt H :=
          Qed.
 
          Lemma bv_mul_eq:
-           forall width (a b: bv width),
-           bv_extract 0 width (bv_mul' (width + width) a b) = (a * b)%bv.
+           forall width (a b: bits width),
+           Zmod.firstn width (bv_mul' (width + width) a b) = (a * b)%Zmod.
          Proof.
-           intros; apply bv_eq. unfold bv_mul'. 
-           rewrite bv_extract_0_unsigned.
-           rewrite Z_to_bv_unsigned. 
-           rewrite bv_wrap_bv_wrap by lia.
-           auto.
+           intros; apply Zmod.unsigned_inj. unfold bv_mul'.
+           rewrite bits.unsigned_firstn, Zmod.unsigned_of_Z, bits.unsigned_mul.
+           apply Z.mod_mod_divide.
+           destruct (Z.le_gt_cases 0 width).
+           - exists (2 ^ width)%Z. apply Z.pow_add_r; lia.
+           - rewrite !Z.pow_neg_r by lia. exists 0%Z. reflexivity.
          Qed.
          Lemma jalr_is_ctrl :
            forall instr_enc,
@@ -3228,12 +3225,16 @@ Ltac wb_start_no_interrupt H :=
                instrs.Decode.opcode_SYSTEM
               ] in *.
            repeat (case_decide; propositional; try congruence).
-           { rewrite H1 in *. rewrite H0 in *. exfalso. 
-             eauto.
-           }
-           { rewrite H1 in *. rewrite H0 in *. exfalso. 
-             eauto.
-           }
+           all: rewrite H1 in *; rewrite H0 in *; exfalso;
+             first [ solve [eauto]
+                   | match goal with
+                     | H : ?a = ?b |- _ =>
+                         lazymatch a with
+                         | Zmod.firstn _ _ => fail
+                         | Zmod.slice _ _ _ => fail
+                         | _ => apply (f_equal Zmod.unsigned) in H; cbv in H; discriminate H
+                         end
+                     end ].
          Qed.
          Lemma execControlLeakEq:
            forall instr_enc pc rs1 rs2 
@@ -3388,25 +3389,25 @@ Ltac wb_start_no_interrupt H :=
              apply execALU_arith_sim with (1 := H1) (2 := H2) (3 := H); auto; by rewrite_solve
            end.
 Lemma eqBits_eq:
-  forall n (x y: bv n),
+  forall n (x y: bits n),
   eqBits x y = embed_bool true <->
   x = y.
 Proof.
   unfold eqBits. intros.
   autorewrite with Bool. split; propositional; try reflexivity.
-  - apply bv_eq. apply Z.eqb_eq in H. auto.
+  - apply Zmod.unsigned_inj. apply Z.eqb_eq in H. auto.
   - apply Z.eqb_eq. auto.
 Qed.
 Hint Rewrite eqBits_eq : Bool.
 Lemma eqBits_eq_false:
-  forall n (x y: bv n),
+  forall n (x y: bits n),
   eqBits x y = embed_bool false <->
   x <> y.
 Proof.
   unfold eqBits. intros.
   autorewrite with Bool. split; propositional; try reflexivity.
-  - apply bv_neq. apply Z.eqb_neq in H. auto.
-  - apply Z.eqb_neq. apply bv_neq. auto.
+  - apply Z.eqb_neq in H. intros Heq. apply H, f_equal, Heq.
+  - apply Z.eqb_neq. intros Heq. apply H, Zmod.unsigned_inj, Heq.
 Qed.
 Hint Rewrite eqBits_eq_false : Bool.
 Lemma E2wPubSim_same :
@@ -3550,16 +3551,15 @@ Proof.
 Qed.
 
 Ltac solve_mul_case :=
-  unfold zeroes in *; simpl; 
-  case_bool_decide; simpl; auto;
-  apply bool_decide_ext; split; auto; try done;
+  simpl; apply bool_decide_ext;
+  case_bool_decide; simpl; split; auto; try done;
   rewrite ones_neq_zeroes; intros; simp_ors; try done.
 Lemma embed_bool_nonzero':
   forall (b: bit),
-  embed_bool (negb (nonzero b)) = bv_not b.
+  embed_bool (negb (nonzero b)) = Zmod.not b.
 Proof.
   intros. destruct (bool_cases b); auto.
-  all: apply bv_eq; auto.
+  all: apply Zmod.unsigned_inj; auto.
 Qed.
 Lemma E2wPubSim_Exn :
   forall i p vi vp,
@@ -3699,7 +3699,7 @@ Ltac exec_relstages_wip :=
   | H : forall _ , ?x = _ -> _, H1: ?x = _ |- _ => specialize H with (1 := H1)
   | H : forall _ _, ?x = _ -> _, H1: ?x = _ |- _ => specialize H with (1 := H1)
   | H : forall _ _ _, ?x = _ -> _, H1: ?x = _ |- _ => specialize H with (1 := H1)
-  | H: ?x = bv_not ?x |- _ => rewrite bv_not_eq_false in H; done
+  | H: ?x = Zmod.not ?x |- _ => rewrite bv_not_eq_false in H; done
   | |- customCSRs.writeCsr _ _ _ = customCSRs.Build_CsrFile _ _ _ _ _ =>
       unfold customCSRs.writeCsr; simpl; f_equal; auto
   | H: MultiplierSpec.reqs ?mul = _, H1: MultiplierSpec.full ?mul = false 
@@ -4140,7 +4140,7 @@ Ltac finish_mmio ::=
                   }
                   {  assert_pre_and_specialize H0; [ clear; destruct_all_matches | ].
                     propositional.
-                    assert (b0 = false).
+                    assert (z0 = false).
                     { match goal with
                       | H: execControlLeakT _ _ _ = _ |- _ =>
                           rewrite HeqVleak in *; clear - H; bash_destruct H
@@ -4336,11 +4336,14 @@ Ltac finish_mmio ::=
         end; try congruence; eauto; try done.
 Lemma bv_or_embed_bool2:
   forall x y z,
- bv_or (embed_bool x) (embed_bool y) = embed_bool z <->
+ Zmod.or (embed_bool x) (embed_bool y) = embed_bool z <->
  x || y = z. 
 Proof.
-  intros. destruct x; destruct y; destruct z; cbn; split; propositional.
-  all: try rewrite bv_eq in *; try done.
+  intros. destruct x; destruct y; destruct z; cbn; split; propositional;
+    try discriminate; try (apply Zmod.unsigned_inj; vm_compute; reflexivity);
+    match goal with
+    | H : @eq (bits _) _ _ |- _ => apply (f_equal Zmod.unsigned) in H; vm_compute in H; discriminate H
+    end.
 Qed.
 Hint Rewrite bv_or_embed_bool2 : Bool.
 
@@ -4408,12 +4411,12 @@ Hint Rewrite bv_or_embed_bool2 : Bool.
         | _ => progress decode_solve_pub_rewrites
         end; try discriminate; auto.
  Lemma bv_cmp_eq_false:
-  forall n (x y: bv n), (bv_unsigned x =? bv_unsigned y)%Z = false <->
+  forall n (x y: bits n), (Zmod.unsigned x =? Zmod.unsigned y)%Z = false <->
                    x <> y.
 Proof.
   intros. split; propositional; auto.
-  - rewrite bv_neq. rewrite Z.eqb_neq in *. done.
-  - rewrite Z.eqb_neq. apply bv_neq. done.
+  - intros Heq. apply Z.eqb_neq in H. apply H, f_equal, Heq.
+  - apply Z.eqb_neq. intros Heq. apply H, Zmod.unsigned_inj, Heq.
 Qed.
 
       Ltac decode_relstages :=
@@ -4442,11 +4445,11 @@ Qed.
                 destruct_evalProg_match himpl
         end; simpl in himpl; simpl in hpub; destruct_match_pairs; simplify_tupless; repeat simp_goal.
  Lemma bv_cmp_eq_true:
-  forall n (x y: bv n), (bv_unsigned x =? bv_unsigned y)%Z = true <->
+  forall n (x y: bits n), (Zmod.unsigned x =? Zmod.unsigned y)%Z = true <->
                    x = y.
 Proof.
   intros. split; propositional; auto.
-  - rewrite bv_eq. rewrite Z.eqb_eq in *. done.
+  - apply Zmod.unsigned_inj. apply Z.eqb_eq. done.
   - rewrite Z.eqb_eq. reflexivity.
 Qed.
 
@@ -4698,10 +4701,10 @@ Qed.
              end
          end.
 Lemma bv_and_embed_true_l': 
-  ∀ b (x : bit), nonzero (bv_and (embed_bool b) x) = b && (nonzero x).
+  ∀ b (x : bit), nonzero (Zmod.and (embed_bool b) x) = b && (nonzero x).
 Proof.
   intros. destruct b; destruct (bool_cases x); auto;
-    apply bv_eq; simp_bools; reflexivity.
+    apply Zmod.unsigned_inj; simp_bools; reflexivity.
 Qed.
 
 Lemma RelStages_setInterrupt:
@@ -4975,8 +4978,7 @@ Arguments execute_stage: simpl never.
          { clear - hrel_post_mmio.
            apply RelStages_preserved with (1 := hrel_post_mmio); auto.
          }
-         { clear - hpubSim_postDmem.
-           apply PubSim_preserved with (1 := hpubSim_postDmem); auto.
+         { apply PubSim_preserved with (1 := hpubSim_postDmem); auto.
          }
          { rewrite_solve. }
        Qed.

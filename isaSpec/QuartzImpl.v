@@ -35,8 +35,8 @@ From quartz.lang Require Import
   Syntax.
 From quartz.examples Require Import Processor.
 (* Import (coercions) domain.Zmod. *)
-Import (coercions) BV.
-Import BV.
+Import (coercions) domain.Zmod.
+Import domain.Zmod.
 Import InterfaceExample.
 Module QuartzCPU. Section Quartz.
   Context (q_isMMIOAddr : forall {var}, fn.fn var cpu.mword Bool).
@@ -397,7 +397,7 @@ Proof.
   - cbn in H. simplify_tupless. done.
   - cbn in H. cbv[lift_mem_req lift_f2d f2d_rep cpu_reify cpu.rep cpu.mem_req_rep] in *. cbn in H.
     simplify_tupless. 
-    repeat f_equal. apply bv_eq; reflexivity.
+    repeat f_equal. apply Zmod.unsigned_inj; reflexivity.
 Qed.
 Lemma Sim_fetch:
   forall s1 s2 s1' b ,
@@ -464,13 +464,10 @@ Definition lift_fields (flds: interp Decode.DecodeFields) : IsaParams.DecodeFiel
     (* Hint Rewrite unsigned_of_Z : zmod. *)
     (* Hint Rewrite Z_to_bv_unsigned : zmod. *)
 Create HintDb bv_simp.
-Hint Rewrite @bv_extract_unsigned : bv_simp.
-Hint Rewrite @bv_extract_signed : bv_simp.
-Hint Rewrite Z_to_bv_unsigned : bv_simp.
-Hint Rewrite Z_to_bv_signed : bv_simp.
-Hint Rewrite @bv_sign_extend_unsigned : bv_simp.
-Hint Rewrite @bv_concat_signed : bv_simp.
-Hint Rewrite @bv_or_signed  : bv_simp.
+Hint Rewrite @bits.unsigned_slice using lia : bv_simp.
+Hint Rewrite @Zmod.unsigned_of_Z : bv_simp.
+Hint Rewrite @Zmod.signed_of_Z : bv_simp.
+Hint Rewrite @Zmod.of_Z_unsigned : bv_simp.
 Opaque Decode.getInstrProps.
 Opaque Decode.getFields.
 Opaque Decode.getImm.
@@ -567,39 +564,39 @@ Ltac fix_instrProps x :=
   let Hiprop := fresh "Hiprop" in 
   destruct (instrProps_eq x) as (? & ? & ? & ? & ? & Hiprop).
 Lemma isSys_eq:
-  forall x, IsaParams.IsSys x = (bv_unsigned x =? bv_unsigned Decode.Inst_System)%Z.
+  forall x, IsaParams.IsSys x = (Zmod.unsigned x =? Zmod.unsigned Decode.Inst_System)%Z.
 Proof.
   unfold IsaParams.IsSys.
   intros. case_bool_decide; subst; auto. symmetry. rewrite Z.eqb_neq. 
-  apply bv_neq in H. auto.
+  intros Heq. apply H, Zmod.unsigned_inj, Heq.
 Qed.
 Lemma isStore_eq:
-  forall x, IsaParams.IsStore x = (bv_unsigned x =? bv_unsigned Decode.Inst_Store)%Z.
+  forall x, IsaParams.IsStore x = (Zmod.unsigned x =? Zmod.unsigned Decode.Inst_Store)%Z.
 Proof.
   unfold IsaParams.IsStore.
   intros. case_bool_decide; subst; auto. symmetry. rewrite Z.eqb_neq. 
-  apply bv_neq in H. auto.
+  intros Heq. apply H, Zmod.unsigned_inj, Heq.
 Qed.
 Lemma isLoad_eq:
-  forall x, IsaParams.IsLoad x = (bv_unsigned x =? bv_unsigned Decode.Inst_Load)%Z.
+  forall x, IsaParams.IsLoad x = (Zmod.unsigned x =? Zmod.unsigned Decode.Inst_Load)%Z.
 Proof.
   unfold IsaParams.IsLoad.
   intros. case_bool_decide; subst; auto. symmetry. rewrite Z.eqb_neq. 
-  apply bv_neq in H. auto.
+  intros Heq. apply H, Zmod.unsigned_inj, Heq.
 Qed.
 Lemma isMul_eq:
-  forall x, IsaParams.IsMul x = (bv_unsigned x =? bv_unsigned Decode.Inst_Mul)%Z.
+  forall x, IsaParams.IsMul x = (Zmod.unsigned x =? Zmod.unsigned Decode.Inst_Mul)%Z.
 Proof.
   unfold IsaParams.IsMul.
   intros. case_bool_decide; subst; auto. symmetry. rewrite Z.eqb_neq. 
-  apply bv_neq in H. auto.
+  intros Heq. apply H, Zmod.unsigned_inj, Heq.
 Qed.
 Lemma isCtrl_eq:
-  forall x, IsaParams.IsCtrl x = (bv_unsigned x =? bv_unsigned Decode.Inst_Ctrl)%Z.
+  forall x, IsaParams.IsCtrl x = (Zmod.unsigned x =? Zmod.unsigned Decode.Inst_Ctrl)%Z.
 Proof.
   unfold IsaParams.IsCtrl.
   intros. case_bool_decide; subst; auto. symmetry. rewrite Z.eqb_neq. 
-  apply bv_neq in H. auto.
+  intros Heq. apply H, Zmod.unsigned_inj, Heq.
 Qed.
 
 Ltac assert_match_eq_goal' H1 :=
@@ -673,12 +670,12 @@ Ltac fix_ctrl x :=
 Lemma isLegalEq: 
   forall x ,
   (bool_decide (x = enum.enum_lookup IsaParams.instType "illegal")) =
-  (bv_unsigned x =? bv_unsigned Decode.Inst_Illegal)%Z.
+  (Zmod.unsigned x =? Zmod.unsigned Decode.Inst_Illegal)%Z.
 Proof.
   intros.
   case_bool_decide; subst; auto.
   symmetry. rewrite Z.eqb_neq. 
-  apply bv_neq in H. auto.
+  intros Heq. apply H, Zmod.unsigned_inj, Heq.
 Qed.
 Lemma LetBlock_eq':
   ∀ (X Y : Type) (a : X) (b : X → Y) z,
@@ -696,7 +693,7 @@ Ltac speed_simp_lets ::=
       simp_init_struct
   | |- eexpr.LetBlock (mk_bit _) _ = _ =>
       apply LetBlock_eq'; cbn
-  | |- eexpr.LetBlock (bv_not _) _ = _ =>
+  | |- eexpr.LetBlock (Zmod.not _) _ = _ =>
       apply LetBlock_eq'; cbn
   | |- eexpr.LetBlock (_ _) _ = _ => fail
   | |- eexpr.LetBlock (if _ then _ else _) _ = _ => fail
@@ -721,8 +718,8 @@ Qed.
 
 Lemma isMemEq: forall x,
  (mk_bit (IsaParams.IsMem x)) =
-   (bv_or (mk_bit (bv_unsigned x =? bv_unsigned Decode.Inst_Store)%Z)
-      (mk_bit (bv_unsigned x =? bv_unsigned Decode.Inst_Load)%Z)).
+   (Zmod.or (mk_bit (Zmod.unsigned x =? Zmod.unsigned Decode.Inst_Store)%Z)
+      (mk_bit (Zmod.unsigned x =? Zmod.unsigned Decode.Inst_Load)%Z)).
 Proof.
   intro x.
   pose proof (elem_of_enum x) as Hin.
@@ -731,7 +728,7 @@ Proof.
   repeat match goal with
   | [Hin : _ = _ ∨ _ |- _] => destruct Hin as [-> | Hin]
   | [Hin : False |- _] => contradiction
-  end; try apply bv_eq; reflexivity.
+  end; try apply Zmod.unsigned_inj; reflexivity.
 Qed.
 Lemma mem_out_eq:
   forall (st: interp Decode.MemAddrOutput),
@@ -746,9 +743,9 @@ Ltac fix_mem_out x :=
   destruct (mem_out_eq x) as (? & ? & ? & ? & Hmem_out).
 Ltac finish_exn := 
   simplify_tupless;
-  cbv[cpu_reify cpu.rep e2w_rep zeroes]; cbn; repeat f_equal;
+  cbv[cpu_reify cpu.rep e2w_rep]; cbn; repeat f_equal;
     try rewrite Equivalent.bv_0_eq; auto;
-    try apply bv_eq; auto.
+    try apply Zmod.unsigned_inj; auto.
 
 Ltac solve_jalr :=
   cbv[IsaParams.IsJalr]; simpl;
@@ -760,10 +757,9 @@ Ltac fix_e2w' x :=
   let He2w := fresh "He2w" in 
   destruct (e2w_book_eq x) as (? & ? & ? & ? & ? & ? & ? & ? & ? & He2w).
  Ltac solve_interrupt :=
-  unfold zeroes;
-  try rewrite Z_to_bv_unsigned;
-  try rewrite Equivalent.bv_0_eq;  
-  try rewrite bv_wrap_small by (unfold bv_modulus; lia); auto.
+  try rewrite Equivalent.bv_0_eq;
+  try rewrite Zmod.unsigned_of_Z;
+  try rewrite Z.mod_small by lia; auto.
 Ltac finish_wb H :=
   apply LetBlock_eq'; cbn;
   assert_match_eq_goal' H ; [ | solve_interrupt; done];
@@ -914,7 +910,7 @@ Proof.
   fix_instrProps instrProps. rewrite Hiprop in *. cbn in *.
   rewrite LetBlock_eq. cbn.
   case_goal_match eqn:hstall; cbn in H; simplify_tupless; auto.
-  cbv[eqBits] in *.
+  cbv[eqBits Zmod.eqb] in *.
   case_goal_match eqn:hepoch; cbn in *.
   { apply LetBlock_eq'; cbn.
     apply LetBlock_eq'; cbn.
@@ -933,12 +929,12 @@ Proof.
     fix_ctrl exec_ctrl. rewrite ctrl in *. cbn in *.
     rewrite LetBlock_eq; cbn.
     rewrite LetBlock_eq; cbn.
-    cbv[embed_bool] in *.
+    cbv[Zmod.eqb] in *.
     rewrite isMul_eq in *.
     assert_match_eq_goal' H. 2 : { reflexivity. }
     case_goal_match eqn:hstall'; cbn in H; simplify_tupless; auto.
     assert_match_eq_goal' H. 
-    2 : { rewrite isLegalEq. rewrite bv_not_bool_to_bv. reflexivity. }
+    2 : { rewrite isLegalEq. rewrite not_embed_bool. reflexivity. }
     case_goal_match eqn:hlegal; cbn in *.
     { assert_match_eq_goal' H. 
       2: { rewrite isMemEq. done. } 
@@ -1082,7 +1078,7 @@ Proof.
     fix_instrProps instrProps. rewrite Hiprop in *. cbn in *.
     rewrite LetBlock_eq.
     cbn.
-    cbv[embed_bool] in *.
+    cbv[Zmod.eqb] in *.
     case_match eqn:hepoch.
     { 
       cbn in *.
@@ -1271,12 +1267,6 @@ Qed.
 Opaque fifo1.impl. 
 Import cpu.
 Import type.
-  Lemma bool_to_Z_zero:
-    forall b,
-    (bool_to_Z (b =? 0) =? 0)%Z = negb (b =? 0)%Z.
-  Proof.
-    intros. destruct (Z.eqb_spec b 0); try reflexivity.
-  Qed.
 
 Lemma Sim_handle_mem_req:
   forall s1 s2 s1' s2' mem,
@@ -1291,10 +1281,9 @@ Proof.
   cbn in *; subst.
   destruct_st Cpu0 Hst; subst. cbn in *.
   destruct mem; simpl in *; 
-  cbv[nonzero isZero] in *; simpl in *;
-  rewrite bool_to_bv_unsigned in * by lia;
-  rewrite bool_to_Z_zero in *;
-    rewrite negb_involutive in *;
+  cbv[isZero] in *; simpl in *;
+  rewrite nonzero_bool in *;
+  cbv[Zmod.eqb] in *; rewrite Zmod.unsigned_0 in *;
   destruct_matches_in_hyp hi; simpl in *; simplify_tupless;
     repeat constructor; auto; simpl.
 Qed.
@@ -1310,9 +1299,9 @@ Proof.
   cbn in *; subst.
   destruct_st Cpu0 Hst; subst. cbn in *.
   destruct mem; simpl in *;
-  cbv[nonzero isZero] in *; simpl in *;
-  rewrite bool_to_bv_unsigned in * by lia;
-  rewrite bool_to_Z_zero in *;
+  cbv[isZero] in *; simpl in *;
+  rewrite nonzero_bool in *;
+  cbv[Zmod.eqb] in *; rewrite Zmod.unsigned_0 in *;
     destruct_matches_in_hyp hi; simpl in *; simplify_tupless; simpl;
     repeat constructor; auto.
 Qed.
@@ -1336,11 +1325,11 @@ Proof.
   simpl in Sim_cpu0. consider CPUSim. subst.
   destruct_st Cpu0 Hst; subst. cbn in *.
   cbn in *; subst. 
-  cbv[nonzero isZero] in *; simpl in *;
-  rewrite bool_to_bv_unsigned in * by lia;
-  rewrite bool_to_Z_zero in *.
+  cbv[isZero] in *; simpl in *;
+  rewrite nonzero_bool in *;
+  cbv[Zmod.eqb] in *; rewrite Zmod.unsigned_0 in *.
   assert_match_eq' hi hq. 
-  2: { clear. 
+  2: { clear hi hq.
        fix_e2w. simpl in H1. rewrite H1. auto.
      }
   bash_destruct hi; cbn in hq; simplify_tupless.

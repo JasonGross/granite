@@ -25,7 +25,7 @@ Ltac simp_bv_eq :=
       | MemInstr => f_equal
       end
   | |- _ => 
-      try apply bv_eq; reflexivity
+      try apply Zmod.unsigned_inj; reflexivity
   end.
 Notation readReg := (registerFile.readReg). 
 Import semantics.

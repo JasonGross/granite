@@ -21,8 +21,8 @@ Module instrs.
   | Csrrw (rd rs1: Register) (csr: Csr)
   | Auipc (rd: Register) (offset: Imm20)
   | Xor  (rd rs1 rs2: Register)
-  | Slli (rd rs1: Register) (shamt: bv 5)
-  | Srli (rd rs1: Register) (shamt: bv 5)
+  | Slli (rd rs1: Register) (shamt: bits 5)
+  | Srli (rd rs1: Register) (shamt: bits 5)
   | Lui  (rd: Register) (imm20: Imm20).
 
   Inductive ControlInstr : Type :=
@@ -46,7 +46,7 @@ Module instrs.
   | LoadAddressMisaligned (addr: mword)
   | StoreAddressMisaligned (addr: mword).
 
-  Open Scope bv_scope.
+  Open Scope Zmod_scope.
   Definition encodeExn (exn: SoftwareError) : mword :=
     match exn with
     | IllegalInstruction _ => 2
@@ -63,7 +63,7 @@ Module instrs.
     | StoreAddressMisaligned addr => addr 
     end.
 
-  Open Scope bv_scope.
+  Open Scope Zmod_scope.
   Declare Scope isa_scope.
   Delimit Scope isa_scope with isa.
   Bind Scope isa_scope with Instr.
@@ -79,9 +79,9 @@ Module instrs.
   Open Scope isa_scope. 
 
   Module Decode.
-    Definition Opcode : Type := bv 7.
-    Definition Funct3 : Type := bv 3.
-    Definition Funct7 : Type := bv 7.
+    Definition Opcode : Type := bits 7.
+    Definition Funct3 : Type := bits 3.
+    Definition Funct7 : Type := bits 7.
 
     Definition opcode_LOAD : Opcode := 3.
     Definition opcode_OP_IMM : Opcode :=
@@ -140,23 +140,19 @@ Module instrs.
     Definition opcode_LUI  : Opcode := 55.
 
     Definition decode (inst: mword) : Instr :=
-      let rd : Register := bv_extract 7 5 inst in
-      let rs1 : Register := bv_extract 15 5 inst in
-      let rs2 : Register := bv_extract 20 5 inst in
-      let uimm5 : Register := bv_extract 20 5 inst in 
-      let funct7 : Funct7 := bv_extract 25 7 inst in
-      let funct3 : Funct3 := bv_extract 12 3 inst in
-      let opcode : Opcode := bv_extract 0 7 inst in
-      let oimm12 : Imm12 := bv_extract 20 12 inst in
-      let imm12 := bv_extract 20 12 inst in
-      let oimm20 : Imm20 := bv_extract 12 20 inst in
-      let simm12 : Imm12 := bv_concat _ (bv_extract 25 7 inst) (bv_extract 7 5 inst) in
-      let sbimm12 : Imm13 := (bv_concat 13 (bv_concat 12
-                                (bv_concat 8
-                                  (bv_concat 2 (bv_extract 31 1 inst) (bv_extract 7 1 inst))
-                                  (bv_extract 25 6 inst))
-                                (bv_extract 8 4 inst)) (bv_0 1)) in
-      let csr12 := bv_extract 20 12 inst in
+      let rd : Register := Zmod.slice 7 12 inst in
+      let rs1 : Register := Zmod.slice 15 20 inst in
+      let rs2 : Register := Zmod.slice 20 25 inst in
+      let uimm5 : Register := Zmod.slice 20 25 inst in 
+      let funct7 : Funct7 := Zmod.slice 25 32 inst in
+      let funct3 : Funct3 := Zmod.slice 12 15 inst in
+      let opcode : Opcode := Zmod.firstn 7 inst in
+      let oimm12 : Imm12 := Zmod.slice 20 32 inst in
+      let imm12 := Zmod.slice 20 32 inst in
+      let oimm20 : Imm20 := Zmod.slice 12 32 inst in
+      let simm12 : Imm12 := Zmod.app (Zmod.slice 7 12 inst) (Zmod.slice 25 32 inst) in
+      let sbimm12 : Imm13 := (Zmod.app ((zeroes : bits 1)) (Zmod.app (Zmod.slice 8 12 inst) (Zmod.app (Zmod.slice 25 31 inst) (Zmod.app (Zmod.slice 7 8 inst) (Zmod.slice 31 32 inst))))) in
+      let csr12 := Zmod.slice 20 32 inst in
       if decide (opcode = opcode_LOAD /\ funct3 = funct3_LW) then
         Lw rd rs1 oimm12
       else if decide (opcode = opcode_OP_IMM /\ funct3 = funct3_ADDI) then
@@ -193,12 +189,12 @@ Module instrs.
    End Decode.
 
   Definition bin_to_bytes (binary: list mword) : list Byte :=
-       concat (map (fun v => (bv_to_little_endian 4 8 (bv_unsigned v)))
+       concat (map (fun v => (bits_to_little_endian 4 8 (Zmod.unsigned v)))
                  binary).
   Module params.
     Class IsaParams (Instr: Type) :=
       { decode : mword -> Instr 
-      ; isMMIOAddr : mword -> bv 1
+      ; isMMIOAddr : mword -> bits 1
       }.
   End params.
 
@@ -208,9 +204,9 @@ Module instrs.
   Instance isaParams : params.IsaParams Instr := 
     {| params.decode := Decode.decode;
        params.isMMIOAddr := fun addr => 
-                              bool_to_bv _ 
-                              (Z.leb MMIO_BASE (bv_unsigned addr) &&
-                              Z.ltb (bv_unsigned addr) MMIO_TOP)
+                              mk_bit 
+                              (Z.leb MMIO_BASE (Zmod.unsigned addr) &&
+                              Z.ltb (Zmod.unsigned addr) MMIO_TOP)
     |}.
 
 End instrs.
@@ -286,7 +282,7 @@ Module leakage.
     | Mul rd rs1 rs2 => 
         let rval1 := getReg rs1 in 
         let rval2 := getReg rs2 in 
-        Mul_leakage (bool_decide (rval1 = bv_0 _ \/ rval2 = bv_0 _))
+        Mul_leakage (bool_decide (rval1 = zeroes \/ rval2 = zeroes))
     | Csrrw rd rs1 csr =>
         match csr with
         | mtvec =>

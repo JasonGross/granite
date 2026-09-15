@@ -30,7 +30,7 @@ From quartz.lang Require Import
 (* Import Bits. *)
 
 (* Import (coercions) domain.Zmod. *)
-Import BV.
+Import domain.Zmod.
 
 (* Definition bv_to_bits (v: *)
 (* Coercion bv_to_bits {n: N} {z: Z} (b: bv n) : bits z := *)
@@ -79,7 +79,7 @@ Section WithContext.
     (* rewrite St_from_to. reflexivity. *)
   Qed.
 
-  Definition default_predPc (tr: trace_t) (pc: bv addr_sz) : bv addr_sz :=
+  Definition default_predPc (tr: trace_t) (pc: bits addr_sz) : bits addr_sz :=
     let st := evalITrace tr in
     (EvalVMethod concrete_spec (PredPc pc) st).
 

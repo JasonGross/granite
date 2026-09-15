@@ -61,7 +61,7 @@ Import (coercions) QuartzLib.
 Import bits.
 Import type.
 (* TODO: from PipelineRefines *)
-Notation bit := (bv 1).
+Notation bit := (bits 1).
 (* Module PipelineTop. *)
 (*   Import Pipelined. *)
 (*   Section WithContext. *)
@@ -188,7 +188,7 @@ Notation bit := (bv 1).
        e2w_isMMIO := isMMIO;
        e2w_nextPc := nextPc
     |}.
-  Import BV.
+  Import domain.Zmod.
   Create HintDb bits.
   Hint Rewrite nonzero_bool: bits.
   (* Hint Rewrite embed_bool_nonzero: bits. *)
@@ -565,7 +565,7 @@ Module Equivalent. Section Equivalent.
                (@AbstractMachine.MulSpec mulImplParams) (@BtbSpecParams btbParams)
                (@BhtSpecParams bhtParams) false (PubInit_pc pub_init) ).
   Notation Impl_CPUBase :=
-    (@ConcreteCPU.base mulImplParams (Bits.zeroes WIDTH)).
+    (@ConcreteCPU.base mulImplParams Bits.zeroes).
 
   Notation SpecCpu := (State Spec_CPUBase).
   Notation ImplCpu := (State Impl_CPUBase).
@@ -682,20 +682,20 @@ Ltac destruct_st st Hnew :=
  let btb := fresh "btb" st in 
  destruct H as (pc & epoch & depoch & iepoch & rf & csrs & toIMem & toDMem & toMMIO & fromIMem & fromDMem & fromMMIO & f2d & d2e & e2w & mul & mip & interruptSrc & bht & btb & Hnew).
 Lemma bool_decide_bv_eq:
-  forall n (x y: bv n),
-  (bool_decide (x = y)) = nonzero (mk_bit (bv_unsigned x =? bv_unsigned y)).
+  forall n (x y: bits n),
+  (bool_decide (x = y)) = nonzero (mk_bit (Zmod.unsigned x =? Zmod.unsigned y)).
 Proof.
   intros; cbv[mk_bit]. case_bool_decide; subst; auto.
   - rewrite Z.eqb_refl. reflexivity.
   - destruct (_ =? _) eqn:?; auto.
     rewrite Z.eqb_eq in *.
-    rewrite bv_eq in *. congruence.
+    rewrite <-Zmod.unsigned_inj_iff in *. congruence.
 Qed.
 Lemma bv_0_eq:
   forall n,
-  bv_0 n = Z_to_bv n 0.
+  (zeroes : bits n) = bits.of_Z n 0.
 Proof.
-  intros. apply bv_eq. reflexivity.
+  intros. apply Zmod.unsigned_inj. rewrite Zmod.unsigned_of_Z. reflexivity.
 Qed.
 Hint Rewrite bv_0_eq : bits.
   Theorem Refines_CPU:
@@ -722,7 +722,6 @@ Hint Rewrite bv_0_eq : bits.
         destruct Csrs; simpl in *.
         cbv[customCSRs.readCsr]. simpl.
         repeat rewrite bool_decide_bv_eq.
-        unfold zeroes. 
         rewrite bv_0_eq.
         reflexivity.
       }
@@ -760,21 +759,20 @@ Hint Rewrite bv_0_eq : bits.
         constructor; simpl; auto.
         unfold customCSRs.writeCsr. simpl.
         repeat rewrite bool_decide_bv_eq.
-        unfold zeroes.
         cbv[csrFile.CSR_mtvec csrFile.CSR_mepc csrFile.CSR_mcause
             csrFile.CSR_mtval csrFile.CSR_mie                             
            ]. 
-        cbv[CSR_mtvec CSR_mepc CSR_mcause CSR_mtval CSR_mie].
-        repeat rewrite Z_to_bv_unsigned.
-        repeat rewrite bv_wrap_small by (unfold bv_modulus; lia). 
-        repeat rewrite bv_unsigned_BV.
+        cbv[CSR_mtvec CSR_mepc CSR_mcause CSR_mtval CSR_mie Zmod.eqb].
+        repeat rewrite Zmod.unsigned_of_Z.
+        repeat rewrite Z.mod_small by lia. 
+        repeat rewrite unsigned_literal.
         repeat case_match; auto.
       }
       { match goal with
       | H: EvalMethod rfScoredSpec _ _ = _,
         H1: EvalMethod (rfs_qspec _ _ ) _ _ = _ |- _ => 
         edestruct @refines_EvalMethod with (3 := H1) (4 := H); eauto; propositional;
-        [ apply Quartz_RfScoredSimulates.refines_rfs; eauto with Simulates; simpl; apply bv_eq; reflexivity | ]
+        [ apply Quartz_RfScoredSimulates.refines_rfs; eauto with Simulates; simpl; apply Zmod.unsigned_inj; reflexivity | ]
       end; eexists; split; eauto. done.
       }
   Qed.
@@ -791,8 +789,8 @@ Set Printing Coercions.
   Hint Rewrite embed_bool_false : bits.
   Ltac solve_bv_eq :=
     match goal with
-    | |- (_: bv _) = (_ :bv _) =>
-        apply bv_eq; reflexivity
+    | |- (_: bits _) = (_ :bits _) =>
+        apply Zmod.unsigned_inj; reflexivity
     end.
 
   Hint Rewrite bv_0_eq: bits.
@@ -807,7 +805,7 @@ Set Printing Coercions.
     { eapply Quartz_RfScoredSimulates.Rel_init. reflexivity. }
     { cbv[customCSRs.initialSt lower_csrs csrFile_rep]. 
       simpl. 
-      unfold zeroes. autorewrite with bits.
+      autorewrite with bits.
       simpl. reflexivity.
     }
     Unshelve. exact id.

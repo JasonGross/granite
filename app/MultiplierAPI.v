@@ -1,5 +1,5 @@
 From stdpp Require Import base finite.
-From stdpp.bitvector Require Import definitions.
+From granite.core Require Import Bits.
 
 From granite.core Require Import
   Bits
@@ -10,8 +10,8 @@ From granite.core Require Import
 
 Module Params.
   Class Params := {
-    width: N;
-    pfWidthNeZero : (width <> 0)%N
+    width: Z;
+    pfWidthNeZero : (width <> 0)%Z
   }.
 End Params.
 
@@ -19,8 +19,8 @@ Section WithContext.
   Context {params: Params.Params}.
 
   Record req_t := { 
-    input_a : bv Params.width;
-    input_b : bv Params.width 
+    input_a : bits Params.width;
+    input_b : bits Params.width 
   }.
 
   Inductive ActionMethod: Type -> Type :=
@@ -29,9 +29,9 @@ Section WithContext.
   | Tick             : ActionMethod unit. 
 
   Inductive ValueMethod : Type -> Type :=
-  | RespReady : ValueMethod (bv 1)
-  | Full : ValueMethod (bv 1)
-  | Peek : ValueMethod (bv (Params.width + Params.width)).
+  | RespReady : ValueMethod (bits 1)
+  | Full : ValueMethod (bits 1)
+  | Peek : ValueMethod (bits (Params.width + Params.width)).
 
 
 End WithContext.

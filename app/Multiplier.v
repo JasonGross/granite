@@ -1,6 +1,6 @@
 (*! Multiplier implementation *)
 From stdpp Require Import base finite.
-From stdpp.bitvector Require Import definitions.
+From granite.core Require Import Bits.
 From RecordUpdate Require Import RecordSet.
 
 From granite.core Require Import
@@ -15,12 +15,12 @@ From granite.core Require Import
 From granite.app Require Import
   MultiplierAPI.
 From quartz.lang Require Syntax domain.
-Import domain.BV.
+Import domain.Zmod.
 Set Primitive Projections.
 Import RecordSetNotations.
 
 Class MultiplierParams :=
-{ logNSteps : N
+{ logNSteps : Z
 }.
 
 Section WithContext.
@@ -30,10 +30,10 @@ Section WithContext.
   #[projections(primitive=no)]
   Record St := Build_St
     { Valid: RegSt bool;
-      Op1 : RegSt (bv Params.width);
-      Op2 : RegSt (bv Params.width);
-      Result: RegSt (bv (Params.width + Params.width));
-      Nstep : RegSt (bv logNSteps);
+      Op1 : RegSt (bits Params.width);
+      Op2 : RegSt (bits Params.width);
+      Result: RegSt (bits (Params.width + Params.width));
+      Nstep : RegSt (bits logNSteps);
       Finished: RegSt bool
     }.
   Instance eta_St: Settable _ := 
@@ -41,26 +41,26 @@ Section WithContext.
 
   Definition initialSt : St :=
     {| Valid := false;
-       Op1 := bv_0 _;
-       Op2 := bv_0 _;
-       Result := bv_0 _;
-       Nstep := bv_0 _;
+       Op1 := zeroes;
+       Op2 := zeroes;
+       Result := zeroes;
+       Nstep := zeroes;
        Finished := false
     |}.
   Inductive BaseVMethod : Type -> Type := 
   | valid : forall {R}, Reg.ValueMethod bool  R -> BaseVMethod R
-  | op1 : forall {R}, Reg.ValueMethod (bv Params.width) R -> BaseVMethod R
-  | op2 : forall {R}, Reg.ValueMethod (bv Params.width) R -> BaseVMethod R
-  | result : forall {R}, Reg.ValueMethod (bv (Params.width + Params.width)) R -> BaseVMethod R
-  | nstep : forall {R}, Reg.ValueMethod (bv logNSteps) R -> BaseVMethod R
+  | op1 : forall {R}, Reg.ValueMethod (bits Params.width) R -> BaseVMethod R
+  | op2 : forall {R}, Reg.ValueMethod (bits Params.width) R -> BaseVMethod R
+  | result : forall {R}, Reg.ValueMethod (bits (Params.width + Params.width)) R -> BaseVMethod R
+  | nstep : forall {R}, Reg.ValueMethod (bits logNSteps) R -> BaseVMethod R
   | finished : forall {R}, Reg.ValueMethod bool  R -> BaseVMethod R.
 
   Inductive BaseMethod : Type -> Type := 
   | valid_ : forall {R}, Reg.ActionMethod bool R -> BaseMethod R
-  | op1_ : forall {R}, Reg.ActionMethod (bv Params.width) R -> BaseMethod R
-  | op2_ : forall {R}, Reg.ActionMethod (bv Params.width) R -> BaseMethod R
-  | result_ : forall {R}, Reg.ActionMethod (bv (Params.width + Params.width)) R -> BaseMethod R
-  | nstep_ : forall {R}, Reg.ActionMethod (bv logNSteps) R -> BaseMethod R
+  | op1_ : forall {R}, Reg.ActionMethod (bits Params.width) R -> BaseMethod R
+  | op2_ : forall {R}, Reg.ActionMethod (bits Params.width) R -> BaseMethod R
+  | result_ : forall {R}, Reg.ActionMethod (bits (Params.width + Params.width)) R -> BaseMethod R
+  | nstep_ : forall {R}, Reg.ActionMethod (bits logNSteps) R -> BaseMethod R
   | finished_ : forall {R}, Reg.ActionMethod bool  R -> BaseMethod R.
 
   Definition evalBaseMethod {A} (m: BaseMethod A) (st: St) : A * St :=
@@ -104,7 +104,7 @@ Section WithContext.
       op1_ (Reg.Write arg.(input_a));;
       op2_ (Reg.Write arg.(input_b));;
       finished_ (Reg.Write (false));;
-      nstep_ (Reg.Write (bv_0 _));;
+      nstep_ (Reg.Write zeroes);;
       pass.
 
   Definition deq : prog unit :=
@@ -122,32 +122,32 @@ Section WithContext.
       op1 ← op1 Reg.Read;
       op2 ← op2 Reg.Read;
       nstep ← nstep Reg.Read;
-      if decide (op1 = bv_0 _ \/ op2 = bv_0 _) then
+      if decide (op1 = zeroes \/ op2 = zeroes) then
         (* short circuit *)
         finished_ (Reg.Write true);;
-        result_ (Reg.Write (bv_0 _));;
+        result_ (Reg.Write zeroes);;
         pass 
-      else if decide (nstep = ones _) then (* done *)
+      else if decide (nstep = (Zmod.opp Zmod.one)) then (* done *)
         finished_ (Reg.Write true);;
         result_ (Reg.Write (bv_mul' _ op1 op2));;
         pass
       else (* tick *)
-        nstep_ (Reg.Write (bv_add nstep (of_Z _ 1)));;
+        nstep_ (Reg.Write (Zmod.add nstep (bits.of_Z _ 1)));;
         pass
     else (* No valid request *)
       pass.
   Close Scope prog_scope.
   Open Scope expr_scope.
 
-  Definition respReady : expr (bv 1) :=
+  Definition respReady : expr (bits 1) :=
     res ← finished Reg.Read;
     return embed_bool res.
 
-  Definition full : expr (bv 1) :=
+  Definition full : expr (bits 1) :=
     is_full ← valid Reg.Read;
     return embed_bool is_full .
 
-  Definition peek : expr (bv (Params.width + Params.width)) :=
+  Definition peek : expr (bits (Params.width + Params.width)) :=
     res ← result Reg.Read;
     return res.
 

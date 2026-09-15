@@ -46,8 +46,8 @@ From quartz.lang Require Import
   Syntax.
 From quartz.examples Require Import Processor.
 (* Import (coercions) domain.Zmod. *)
-Import (coercions) BV.
-Import BV.
+Import (coercions) domain.Zmod.
+Import domain.Zmod.
 Import InterfaceExample.
 
 Section QuartzTopPf.

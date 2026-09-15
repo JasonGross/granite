@@ -1,4 +1,5 @@
-From stdpp Require Import base finite nmap stringmap vector bitvector.definitions.
+From stdpp Require Import base finite nmap stringmap vector.
+From granite.core Require Import Bits.
 From quartz.lang Require Import domain Syntax. (* Import (coercions) domain.Zmod. *)
 From quartz.lang Require Import ident_to_string let_lift.
 From quartz.examples Require Import Processor.
@@ -12,14 +13,7 @@ From granite.isaSpec Require Import
   Pipelined_QuartzImpl
   QuartzLib.
 
-Lemma bv_swrap_bv_wrap'
-     : ∀ (n1 n2 : N) (bv : Z),
-         (n1 ≤ n2)%N → bv_swrap n1 (bv_wrap n2 bv) = bv_swrap n1 bv.
-Proof.
-  intros. unfold bv_swrap.
-  rewrite <-bv_wrap_add_idemp_l, bv_wrap_bv_wrap, bv_wrap_add_idemp_l; done.
-Qed.
-Import BV.
+Import domain.Zmod.
 Import InterfaceExample.
 
 Definition lift_fields (flds: interp Decode.DecodeFields) : IsaParams.DecodeFields :=
@@ -39,18 +33,24 @@ Definition lift_fields (flds: interp Decode.DecodeFields) : IsaParams.DecodeFiel
     (* Hint Rewrite unsigned_of_Z : zmod. *)
     (* Hint Rewrite Z_to_bv_unsigned : zmod. *)
 Create HintDb bv_simp.
-Hint Rewrite @bv_extract_unsigned : bv_simp.
-Hint Rewrite @bv_extract_signed : bv_simp.
-Hint Rewrite Z_to_bv_unsigned : bv_simp.
-Hint Rewrite Z_to_bv_signed : bv_simp.
-Hint Rewrite @bv_sign_extend_unsigned : bv_simp.
+Hint Rewrite @bits.unsigned_slice using lia : bv_simp.
+Hint Rewrite @Zmod.unsigned_of_Z : bv_simp.
+Hint Rewrite @Zmod.signed_of_Z : bv_simp.
+Hint Rewrite @Zmod.of_Z_unsigned : bv_simp.
 (* Hint Rewrite @bv_concat_signed : bv_simp. *)
-Hint Rewrite @bv_or_signed  : bv_simp.
+Lemma unsigned_skipn_0 {n} (x : bits n) : Zmod.unsigned (Zmod.skipn 0 x) = Zmod.unsigned x.
+Proof.
+  etransitivity; [apply bits.unsigned_skipn; lia|].
+  rewrite Z.pow_0_r, Z.div_1_r. reflexivity.
+Qed.
+Lemma firstn_skipn_0 {n} k (x : bits n) : Zmod.firstn k (Zmod.skipn 0 x) = Zmod.firstn k x.
+Proof. apply Zmod.unsigned_inj. rewrite !bits.unsigned_firstn, unsigned_skipn_0. reflexivity. Qed.
+Hint Rewrite @firstn_skipn_0 : bv_simp.
 Lemma isMemEq: forall x,
  nonzero (Bits.mk_bit (IsaParams.IsMem x)) =
  nonzero
-   (bv_or (Bits.mk_bit (bv_unsigned x =? bv_unsigned Decode.Inst_Store)%Z)
-      (Bits.mk_bit (bv_unsigned x =? bv_unsigned Decode.Inst_Load)%Z)).
+   (Zmod.or (Bits.mk_bit (Zmod.eqb x Decode.Inst_Store))
+      (Bits.mk_bit (Zmod.eqb x Decode.Inst_Load))).
 Proof.
   intro x.
   pose proof (elem_of_enum x) as Hin.
@@ -62,24 +62,24 @@ Proof.
   end; reflexivity.
 Qed.
 Lemma bv_not_simp:
-  forall (b: bv 1),
-  embed_bool (negb (nonzero b)) = bv_not b.
+  forall (b: bits 1),
+  embed_bool (negb (nonzero b)) = Zmod.not b.
 Proof.
-  intro b. apply bv_eq.
+  intro b. apply Zmod.unsigned_inj.
   pose proof (elem_of_enum b) as Hin.
   repeat (setoid_rewrite elem_of_cons in Hin).
   rewrite elem_of_nil in Hin. vm_compute in Hin.
   destruct Hin as [->|[->|H]]; [reflexivity | reflexivity | contradiction].
 Qed.
 Lemma bv_not_simp':
-  forall (b: bv 1),
-  Bits.mk_bit (negb (nonzero b)) = bv_not b.
+  forall (b: bits 1),
+  Bits.mk_bit (negb (nonzero b)) = Zmod.not b.
 Proof. exact bv_not_simp. Qed.
 Lemma bv_and_embed_bool:
   ∀ b1 b2 : bool,
-    bv_and (embed_bool b1) ((embed_bool b2)) = embed_bool (b1 && b2).
+    Zmod.and (embed_bool b1) ((embed_bool b2)) = embed_bool (b1 && b2).
 Proof.
-  intros. apply bv_eq. destruct b1, b2; reflexivity. 
+  intros. apply Zmod.unsigned_inj. destruct b1, b2; reflexivity. 
 Qed.
 From quartz.lang Require Import Syntax.
 Import fn.
@@ -94,9 +94,9 @@ Import InterfaceExample.
              (#addr < _ 'd Riscv.instrs.MMIO_TOP))).
 Lemma mk_bit_bv_and:
   forall x y,
-  bv_and (Bits.mk_bit x) (Bits.mk_bit y) = Bits.mk_bit (x && y).
+  Zmod.and (Bits.mk_bit x) (Bits.mk_bit y) = Bits.mk_bit (x && y).
 Proof.
-  intros x y. destruct x, y; apply bv_eq; reflexivity.
+  intros x y. destruct x, y; apply Zmod.unsigned_inj; reflexivity.
 Qed.
 
 
@@ -105,16 +105,16 @@ Qed.
   Proof.
     apply FunctionalExtensionality.functional_extensionality.
     intros; cbn. 
-    apply bv_eq.
+    apply Zmod.unsigned_inj.
     rewrite mk_bit_bv_and.
-    rewrite !Z_to_bv_unsigned.
-    rewrite !bv_wrap_small
-      by (unfold bv_modulus, Riscv.instrs.MMIO_BASE, Riscv.instrs.MMIO_TOP; lia).
+    rewrite !Zmod.unsigned_of_Z.
+    rewrite !Z.mod_small
+      by (unfold Riscv.instrs.MMIO_BASE, Riscv.instrs.MMIO_TOP; lia).
     reflexivity.
   Qed.
 
 Lemma embed_nonzero:
-  forall (x: bv 1),
+  forall (x: bits 1),
   embed_bool (nonzero x) = x.
 Proof.
   intro x.
@@ -131,18 +131,8 @@ Proof.
   case_goal_match. cbn in f. destruct_pairs.
   cbn in Heqi0.  simplify_tupless.
   unfold IsaParams.getFields. cbn.
-  repeat f_equal; apply bv_eq;
-  repeat match goal with
-  | |- context[bv_wrap ?x ?y] =>
-      rewrite (bv_wrap_small x y) by (unfold bv_modulus; lia)
-  | |- context[bv_wrap ?x (bv_wrap ?y ?z)] =>
-      rewrite (bv_wrap_bv_wrap x y z) by lia
-  | |- _ =>
-    autorewrite with bv_simp;
-    repeat rewrite bv_swrap_bv_wrap' by lia;
-    repeat rewrite bv_wrap_bv_wrap by lia
-    (* repeat rewrite @bv_concat_unsigned by lia *)
-  end; auto.
+  repeat f_equal; autorewrite with bv_simp; auto.
+  apply Zmod.unsigned_inj. symmetry. apply unsigned_skipn_0.
 Qed.
 Definition lift_instrProps (props: interp Decode.InstrProps) : IsaParams.InstrProps :=
   let '(rs1Valid, (rs2Valid, (rdValid, (itype, (immediateType, _))))) := props in
@@ -159,34 +149,34 @@ Definition lift_instrProps (props: interp Decode.InstrProps) : IsaParams.InstrPr
 
 (* nonzero (bv_and (embed_bool b1) (embed_bool b2)) = b1 && b2 *)
 Lemma nonzero_and_embed_bool (b1 b2 : bool) :
-  nonzero (bv_and (embed_bool b1) (embed_bool b2)) = b1 && b2.
+  nonzero (Zmod.and (embed_bool b1) (embed_bool b2)) = b1 && b2.
 Proof. destruct b1, b2; reflexivity. Qed.
 
 (* nonzero (bv_and (bv_and (embed_bool b1) (embed_bool b2)) (embed_bool b3)) = b1 && b2 && b3 *)
 Lemma nonzero_and3_embed_bool (b1 b2 b3 : bool) :
-  nonzero (bv_and (bv_and (embed_bool b1) (embed_bool b2)) (embed_bool b3)) = b1 && b2 && b3.
+  nonzero (Zmod.and (Zmod.and (embed_bool b1) (embed_bool b2)) (embed_bool b3)) = b1 && b2 && b3.
 Proof. destruct b1, b2, b3; reflexivity. Qed.
 
 Lemma nonzero_or_embed_bool (b1 b2 : bool) :
-  nonzero (bv_or (embed_bool b1) (embed_bool b2)) = b1 || b2.
+  nonzero (Zmod.or (embed_bool b1) (embed_bool b2)) = b1 || b2.
 Proof. destruct b1, b2; reflexivity. Qed.
 Hint Rewrite @nonzero_or_embed_bool : bv_simp.
 
 (* bool_decide (x = y) = (bv_unsigned x =? bv_unsigned y)  for bv n *)
 (* bool_decide (x = y) = (bv_unsigned x =? bv_unsigned y)  for bv n *)
-Lemma bool_decide_bv_unsigned_eq {n} (x y : bv n) :
-  bool_decide (x = y) = (bv_unsigned x =? bv_unsigned y)%Z.
+Lemma bool_decide_bv_unsigned_eq {n} (x y : bits n) :
+  bool_decide (x = y) = (Zmod.unsigned x =? Zmod.unsigned y)%Z.
 Proof.
   case_bool_decide; subst; auto.
   - rewrite Z.eqb_refl. reflexivity.
-  - symmetry. rewrite Z.eqb_neq. apply bv_neq in H. auto.
+  - symmetry. rewrite Z.eqb_neq. rewrite <-Zmod.unsigned_inj_iff in H. auto.
 Qed.
 Hint Rewrite @bool_decide_bv_unsigned_eq : bv_simp.
 
 (* bool_decide (x = a /\ y = b) = (bv_unsigned x =? bv_unsigned a) && (bv_unsigned y =? bv_unsigned b) *)
-Lemma bool_decide_bv_and2 {n m} (x a : bv n) (y b : bv m) :
+Lemma bool_decide_bv_and2 {n m} (x a : bits n) (y b : bits m) :
   bool_decide (x = a /\ y = b) =
-  (bv_unsigned x =? bv_unsigned a)%Z && (bv_unsigned y =? bv_unsigned b)%Z.
+  (Zmod.unsigned x =? Zmod.unsigned a)%Z && (Zmod.unsigned y =? Zmod.unsigned b)%Z.
 Proof.
   rewrite bool_decide_and.
   repeat rewrite bool_decide_bv_unsigned_eq.
@@ -194,11 +184,11 @@ Proof.
 Qed.
 
 (* bool_decide (x = a /\ y = b /\ z = c) = ... for triple conjunctions (ADD/MUL decode) *)
-Lemma bool_decide_bv_and3 {n1 n2 n3} (x a : bv n1) (y b : bv n2) (z c : bv n3) :
+Lemma bool_decide_bv_and3 {n1 n2 n3} (x a : bits n1) (y b : bits n2) (z c : bits n3) :
   bool_decide (x = a /\ y = b /\ z = c) =
-  (bv_unsigned x =? bv_unsigned a)%Z &&
-  (bv_unsigned y =? bv_unsigned b)%Z &&
-  (bv_unsigned z =? bv_unsigned c)%Z.
+  (Zmod.unsigned x =? Zmod.unsigned a)%Z &&
+  (Zmod.unsigned y =? Zmod.unsigned b)%Z &&
+  (Zmod.unsigned z =? Zmod.unsigned c)%Z.
 Proof.
   rewrite bool_decide_and, bool_decide_and.
   repeat rewrite bool_decide_bv_unsigned_eq.
@@ -214,8 +204,8 @@ Proof. destruct b; reflexivity. Qed.
 (* bv_not (embed_bool b) = embed_bool (negb b)
    (embed_bool = bool_to_bv 1, so this is bv_not_bool_to_bv) *)
 Lemma embed_bool_negb (b : bool) :
-  bv_not (embed_bool b) = embed_bool (negb b).
-Proof. exact (bv_not_bool_to_bv b). Qed.
+  Zmod.not (embed_bool b) = embed_bool (negb b).
+Proof. apply Zmod.unsigned_inj. destruct b; reflexivity. Qed.
 
 Opaque Decode.getFields.
 Lemma lookupCSR_some: forall v,
@@ -229,16 +219,17 @@ Proof.
   repeat rewrite bool_decide_bv_unsigned_eq.
   cbv [csrFile.CSR_mtvec csrFile.CSR_mepc csrFile.CSR_mcause
        csrFile.CSR_mtval csrFile.CSR_mie
-       CSR_mtvec CSR_mepc CSR_mcause CSR_mtval CSR_mie].
-  repeat rewrite Z_to_bv_unsigned.
-  repeat rewrite bv_wrap_small by (unfold bv_modulus; lia).
+       CSR_mtvec CSR_mepc CSR_mcause CSR_mtval CSR_mie Zmod.eqb].
+  repeat rewrite Zmod.unsigned_of_Z.
+  repeat rewrite Z.mod_small by lia.
+  repeat rewrite unsigned_literal.
   cbv[mret option_ret].
   repeat match goal with
   | |- context[Z.eqb ?x ?y] =>
       let H := fresh in
       destruct (Z.eqb x y) eqn:H; try setoid_rewrite H
   end.
-  all: auto.
+  all: vm_compute; reflexivity.
 Qed.
 Opaque Decode.lookupCSR.
 
@@ -262,18 +253,19 @@ Proof.
   (* Both sides now have identical (=?)-based boolean conditions.
      Distribute lift_instrProps through the RHS if-else tree. *)
   repeat rewrite lift_instrProps_if.
+  autorewrite with bv_simp.
   repeat match goal with
   | |- (if ?x then _ else _) = (if ?y then _ else _) =>
       replace x with y by reflexivity;
-      case_goal_match; [cbn; f_equal; try apply bv_eq; auto| ]
+      case_goal_match; [cbn; f_equal; try apply Zmod.unsigned_inj; auto| ]
   end .
   { rewrite<-lookupCSR_some.
     unfold Utils.is_some. 
-    destruct (lookupCSR (bv_extract 20 12 i)) eqn:?.
-    - setoid_rewrite Heqo. f_equal; apply bv_eq; done.
-    - setoid_rewrite Heqo. f_equal; apply bv_eq; done.
+    destruct (lookupCSR (Zmod.slice 20 32 i)) eqn:?.
+    - setoid_rewrite Heqo. f_equal; apply Zmod.unsigned_inj; done.
+    - setoid_rewrite Heqo. f_equal; apply Zmod.unsigned_inj; done.
   }
-  { cbn. f_equal; apply bv_eq; auto. }
+  { cbn. f_equal; apply Zmod.unsigned_inj; auto. }
 Qed.
 Opaque Decode.getFields. Opaque IsaParams.getFields.
 Opaque IsaParams.getInstrProps.
@@ -304,9 +296,9 @@ Proof.
   repeat match goal with
   | |- (if ?x then _ else _) = (if ?y then _ else _) =>
       replace x with y by reflexivity;
-      case_goal_match; [cbn; f_equal; try apply bv_eq; auto| ]
+      case_goal_match; [cbn; f_equal; try apply Zmod.unsigned_inj; auto| ]
   end .
-  apply bv_eq; reflexivity.
+  apply Zmod.unsigned_inj; reflexivity.
 Qed.
 
 Opaque IsaParams.getImm.
@@ -336,19 +328,19 @@ Proof.
   repeat match goal with
   | |- (if ?x then _ else _) = (let '(_, _) := (if ?y then _ else _) in _) =>
       replace x with y by reflexivity;
-      case_goal_match; [cbn; f_equal; try apply bv_eq; auto| ]
+      case_goal_match; [cbn; f_equal; try apply Zmod.unsigned_inj; auto| ]
   | |- ((if ?x then _ else _), _) = (let '(_, _) := (if ?y then _ else _) in _) =>
       replace x with y by reflexivity;
-      case_goal_match; [cbn; f_equal; try apply bv_eq; auto| ]
+      case_goal_match; [cbn; f_equal; try apply Zmod.unsigned_inj; auto| ]
   end.
-  f_equal. apply bv_eq; reflexivity.
+  f_equal. apply Zmod.unsigned_inj; reflexivity.
 Qed.
 Lemma isStore_eq:
-  forall x, IsaParams.IsStore x = (bv_unsigned x =? bv_unsigned Decode.Inst_Store)%Z.
+  forall x, IsaParams.IsStore x = (Zmod.unsigned x =? Zmod.unsigned Decode.Inst_Store)%Z.
 Proof.
   unfold IsaParams.IsStore.
   intros. case_bool_decide; subst; auto. symmetry. rewrite Z.eqb_neq. 
-  apply bv_neq in H. auto.
+  intros Heq. apply H, Zmod.unsigned_inj, Heq.
 Qed.
 Opaque IsaParams.IsStore.
 Definition memAddrEq:
@@ -375,9 +367,9 @@ Proof.
   repeat match goal with
   | |- (if ?x then _ else _) = (let '(_, _) := (if ?y then _ else _) in _) =>
       replace x with y by reflexivity;
-      case_goal_match; [cbn; f_equal; try apply bv_eq; auto | ]
+      case_goal_match; [cbn; f_equal; try apply Zmod.unsigned_inj; auto | ]
   end.
-  all: repeat f_equal; try apply bv_eq; try done.
+  all: repeat f_equal; try apply Zmod.unsigned_inj; try done.
   rewrite isStore_eq.
   repeat match goal with
   | |- context[Z.eqb ?x ?y] =>
@@ -387,12 +379,12 @@ Proof.
 Qed.
 Set Printing Coercions.
 
-Lemma bool_decide_bv_unsigned_neq {n} (x y : bv n) :
-  bool_decide (x <> y) = (negb (bv_unsigned x =? bv_unsigned y)%Z).
+Lemma bool_decide_bv_unsigned_neq {n} (x y : bits n) :
+  bool_decide (x <> y) = (negb (Zmod.unsigned x =? Zmod.unsigned y)%Z).
 Proof.
   case_bool_decide; subst; auto.
   - symmetry. apply negb_true_iff.
-    rewrite bv_neq in H. apply Z.eqb_neq. done.
+    rewrite <-Zmod.unsigned_inj_iff in H. apply Z.eqb_neq. done.
   - symmetry. apply negb_false_iff.
     apply Z.eqb_refl.
 Qed.
@@ -415,6 +407,7 @@ Proof.
   destruct (fn.interp Decode.getFields x0) as
     (rs1Idx & rs2Idx & rdIdx & csrIdx & immI & immS & immB & immU & csr & opcode & funct3 & funct7 & []).
   unfold lift_instrProps, lift_fields. cbn.
+  cbv [Zmod.eqb].
   (* Normalize conditions *)
   repeat rewrite nonzero_and_embed_bool.
   repeat rewrite nonzero_bool.
@@ -428,25 +421,25 @@ Ltac simp_ctrl :=
   repeat match goal with
   | |- (if ?x then _ else _) = (let '(_, _) := (if ?y then _ else _) in _) =>
       replace x with y by reflexivity;
-      case_goal_match; [cbn; f_equal; try apply bv_eq; auto| ]
+      case_goal_match; [cbn; f_equal; try apply Zmod.unsigned_inj; auto| ]
   | |- ((if ?x then _ else _), _) = (let '(_, _) := (if ?y then _ else _) in _) =>
       replace x with y by reflexivity;
-      case_goal_match; [cbn; f_equal; try apply bv_eq; auto| ]
+      case_goal_match; [cbn; f_equal; try apply Zmod.unsigned_inj; auto| ]
   | |- ((if ?x then _ else _)) = (if ?y then _ else _) =>
       replace x with y by reflexivity;
-      case_goal_match; [ cbn; f_equal; try apply bv_eq; auto | ] 
+      case_goal_match; [ cbn; f_equal; try apply Zmod.unsigned_inj; auto | ] 
   end.
   simp_ctrl.
-  { repeat f_equal. apply bv_eq; done. }
-  { replace (bv_unsigned Decode.funct3_BNE) with
-              (bv_unsigned (Riscv.instrs.Decode.funct3_BNE)) by reflexivity.
-    case_goal_match; [ cbn; repeat f_equal; try apply bv_eq; auto | ]; 
+  { repeat f_equal. apply Zmod.unsigned_inj; done. }
+  { replace (Zmod.unsigned Decode.funct3_BNE) with
+              (Zmod.unsigned (Riscv.instrs.Decode.funct3_BNE)) by reflexivity.
+    case_goal_match; [ cbn; repeat f_equal; try apply Zmod.unsigned_inj; auto | ]; 
       autorewrite with bv_simp.
     { rewrite nonzero_bool; auto. }
     { setoid_rewrite nonzero_bool. 
       repeat f_equal.
-      apply bv_eq. auto.
+      apply Zmod.unsigned_inj. auto.
     }
   }
-  { repeat f_equal; apply bv_eq; done. }
+  { repeat f_equal; apply Zmod.unsigned_inj; done. }
 Qed.

@@ -12,7 +12,7 @@ Set Primitive Projections.
 Import RecordSetNotations.
 
 From quartz.lang Require Import Syntax domain.
-Import domain.BV.
+Import domain.Zmod.
 
 Section WithContext.
   Context {Val: Type}.

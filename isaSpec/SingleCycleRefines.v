@@ -27,13 +27,12 @@ From granite.isaSpec Require Import
   PipelineRefinesBase
   Spec
   SpecTop.
-From stdpp.bitvector Require Import tactics.
 (* From granite.isaSpec Require MultiCycle. *)
 Set Nested Proofs Allowed.
-Notation bit := (bv 1).
+Notation bit := (bits 1).
 From quartz Require Syntax.
-Import (coercions) domain.BV.
-Import domain.BV.
+Import (coercions) domain.Zmod.
+Import domain.Zmod.
 Import PipelineRefines.
 Module SingleCycleRefines.
   Notation Input := ((IFC.PubInput * IFC.SecInput):Type).
@@ -304,11 +303,11 @@ Tactic Notation "match_innermost_in_hyp" ident(H1) "as" ident(H2) :=
 
     Ltac rewrite_ops_and_functs :=
       repeat match goal with
-      | H: bv_extract 0 7 _ = _ |- _ => rewrite H in *
-      | H: bv_extract 12 3 _ = _ |- _ => rewrite H in *
-      | H: bv_extract 25 7 _ = _ |- _ => rewrite H in *
-      | H: bv_extract 12 20 _ = _ |- _ => rewrite H in *
-      | H: bv_extract 20 5 _ = _ |- _ => rewrite H in *
+      | H: Zmod.firstn 7 _ = _ |- _ => rewrite H in *
+      | H: Zmod.slice 12 15 _ = _ |- _ => rewrite H in *
+      | H: Zmod.slice 25 32 _ = _ |- _ => rewrite H in *
+      | H: Zmod.slice 12 32 _ = _ |- _ => rewrite H in *
+      | H: Zmod.slice 20 25 _ = _ |- _ => rewrite H in *
       end.
 
     Ltac start_exec_alu :=
@@ -322,27 +321,21 @@ Tactic Notation "match_innermost_in_hyp" ident(H1) "as" ident(H2) :=
       end.
 
     Definition ValidDecodeFields (inst: mword) : Prop :=
-      let _rd := bv_extract 7 5 inst in
-      let _rs1 := bv_extract 15 5 inst in
-      let _rs2 := bv_extract 20 5 inst in
-      let _funct7 := bv_extract 25 7 inst in
-      let _funct3 := bv_extract 12 3 inst in
-      let _opcode := bv_extract 0 7 inst in
-      let _oimm12 := bv_extract 20 12 inst in
-      let _imm12 := bv_extract 20 12 inst in
-      let _oimm20 := bv_extract 12 20 inst in
-      let _simm12 := bv_concat 12 (bv_extract 25 7 inst) (bv_extract 7 5 inst)
+      let _rd := Zmod.slice 7 12 inst in
+      let _rs1 := Zmod.slice 15 20 inst in
+      let _rs2 := Zmod.slice 20 25 inst in
+      let _funct7 := Zmod.slice 25 32 inst in
+      let _funct3 := Zmod.slice 12 15 inst in
+      let _opcode := Zmod.firstn 7 inst in
+      let _oimm12 := Zmod.slice 20 32 inst in
+      let _imm12 := Zmod.slice 20 32 inst in
+      let _oimm20 := Zmod.slice 12 32 inst in
+      let _simm12 := Zmod.app (Zmod.slice 7 12 inst) (Zmod.slice 25 32 inst)
         in
       let _sbimm12 :=
-        bv_concat 13
-          (bv_concat 12
-             (bv_concat 8
-                (bv_concat 2 (bv_extract 31 1 inst) (bv_extract 7 1 inst))
-                (bv_extract 25 6 inst))
-             (bv_extract 8 4 inst))
-          (bv_0 1)
+        Zmod.app ((zeroes : bits 1)) (Zmod.app (Zmod.slice 8 12 inst) (Zmod.app (Zmod.slice 25 31 inst) (Zmod.app (Zmod.slice 7 8 inst) (Zmod.slice 31 32 inst))))
         in
-      let _csr12 := bv_extract 20 12 inst in
+      let _csr12 := Zmod.slice 20 32 inst in
       match instrs.Decode.decode inst with
       | instrs.Strt sinstr =>
           match sinstr with
@@ -450,26 +443,25 @@ Tactic Notation "match_innermost_in_hyp" ident(H1) "as" ident(H2) :=
         repeat case_decide; try split_and; propositional.
         match_innermost_in_goal; repeat split_and; auto.
       Qed.
-      Lemma bv_shamt_eq : forall (b: bv 32),
-        bv_extract 25 7 b = 0%bv ->
-        bv_sign_extend 32 (bv_extract 20 12 b ) =
-        bv_zero_extend 32 (bv_extract 20 5 b ).
+      Lemma bv_shamt_eq : forall (b: bits 32),
+        Zmod.slice 25 32 b = 0%Zmod ->
+        Zmod.unsigned (bits.of_Z 32 (Zmod.signed (Zmod.slice 20 32 b))) =
+        Zmod.unsigned (Zmod.slice 20 25 b).
       Proof.
         intros b H.
-        apply bv_eq in H. bv_simplify H.
-        apply bv_eq. bv_simplify.
-        pose proof bv_unsigned_in_range _ b as Hr.
-        unfold bv_wrap, bv_modulus in *. simpl Z.of_N in *.
-        rewrite Z.shiftr_div_pow2 in H by lia.
-        assert (bv_unsigned b < 2 ^ 25)%Z as Hb25.
+        apply (f_equal Zmod.unsigned) in H.
+        rewrite bits.unsigned_slice, unsigned_literal in H by lia.
+        pose proof (bits.unsigned_range b ltac:(lia)) as Hr.
+        assert (Hb25 : (Zmod.unsigned b < 2 ^ 25)%Z).
         { rewrite Z.mod_small in H.
-          - apply Z.div_small_iff in H; lia.
+          - pose proof (Z.div_small_iff (Zmod.unsigned b) (2 ^ 25) ltac:(lia)) as [Hd _];
+              specialize (Hd H); lia.
           - split; [apply Z.div_pos; lia | apply Z.div_lt_upper_bound; lia]. }
-        rewrite Z.shiftr_div_pow2 by lia.
-        assert (bv_unsigned b / 2 ^ 20 < 2 ^ 5)%Z by (apply Z.div_lt_upper_bound; lia).
-        assert (0 <= bv_unsigned b / 2 ^ 20)%Z by (apply Z.div_pos; lia).
-        unfold bv_swrap, bv_half_modulus, bv_wrap, bv_modulus. simpl Z.of_N.
-        rewrite !Z.mod_small; lia.
+        assert (0 <= Zmod.unsigned b / 2 ^ 20 < 2 ^ 5)%Z
+          by (split; [apply Z.div_pos; lia | apply Z.div_lt_upper_bound; lia]).
+        rewrite Zmod.unsigned_of_Z, Zmod.signed_small; rewrite !bits.unsigned_slice by lia.
+        all: repeat rewrite (Z.mod_small (Zmod.unsigned b / 2 ^ 20)) by lia;
+          first [reflexivity | apply Z.mod_small; lia | lia].
       Qed.
 
 
@@ -481,7 +473,7 @@ Tactic Notation "match_innermost_in_hyp" ident(H1) "as" ident(H2) :=
             | instrs.Addi rd rs1 imm =>
                 forall rs1_val rs2_val csrval pc,
                 execALU (decode inst) rs1_val rs2_val csrval pc =
-                  (rs1_val + bv_sign_extend _ imm, zeroes)
+                  (rs1_val + bits.of_Z _ (Zmod.signed imm), zeroes)
             | instrs.Add rd rs1 rs2 =>
                 forall rs1_val rs2_val csrval pc,
                 execALU (decode inst) rs1_val rs2_val csrval pc =
@@ -493,23 +485,23 @@ Tactic Notation "match_innermost_in_hyp" ident(H1) "as" ident(H2) :=
             | instrs.Auipc rd offset =>
                 forall rs1_val rs2_val csrval pc,
                 execALU (decode inst) rs1_val rs2_val csrval pc =
-                  (pc + ((bv_sign_extend 32 offset) ≪ 12), zeroes)
+                  (pc + (Zmod.slu (bits.of_Z 32 (Zmod.signed offset)) 12), zeroes)
             | instrs.Xor rd rs1 rs2 =>
                 forall rs1_val rs2_val csrval pc,
                 execALU (decode inst) rs1_val rs2_val csrval pc =
-                  (bv_xor rs1_val rs2_val, zeroes)
+                  (Zmod.xor rs1_val rs2_val, zeroes)
             | instrs.Slli rd rs1 shamt =>
                 forall rs1_val rs2_val csrval pc,
                 execALU (decode inst) rs1_val rs2_val csrval pc =
-                  (bv_shiftl rs1_val (bv_zero_extend _ shamt) , zeroes)
+                  (Zmod.slu rs1_val (Zmod.unsigned shamt) , zeroes)
             | instrs.Srli rd rs1 shamt =>
                 forall rs1_val rs2_val csrval pc,
                 execALU (decode inst) rs1_val rs2_val csrval pc =
-                 (bv_shiftr rs1_val (bv_zero_extend _ shamt) , zeroes)
+                 (Zmod.sru rs1_val (Zmod.unsigned shamt) , zeroes)
             | instrs.Lui rd imm20 =>
                 forall rs1_val rs2_val csrval pc,
                 execALU (decode inst) rs1_val rs2_val csrval pc =
-                 ((bv_sign_extend 32 imm20) ≪ 12 , zeroes)
+                 (Zmod.slu (bits.of_Z 32 (Zmod.signed imm20)) 12 , zeroes)
             | _ => True
             end
         | instrs.Ctrl ctrl => True
@@ -531,8 +523,8 @@ Tactic Notation "match_innermost_in_hyp" ident(H1) "as" ident(H2) :=
       Qed.
       (* Mirrors the Quartz Processor's "#taken & ~#isAligned" bitvector pattern. *)
       Lemma bv_and_embed_bool_bv_not (b1 b2 : bool) :
-        bv_and (embed_bool b1) (bv_not (embed_bool b2)) = embed_bool (b1 && negb b2).
-      Proof. apply bv_eq. destruct b1, b2; reflexivity. Qed.
+        Zmod.and (embed_bool b1) (Zmod.not (embed_bool b2)) = embed_bool (b1 && negb b2).
+      Proof. apply Zmod.unsigned_inj. destruct b1, b2; reflexivity. Qed.
 
       Ltac start_exec_control :=
         match goal with
@@ -542,7 +534,7 @@ Tactic Notation "match_innermost_in_hyp" ident(H1) "as" ident(H2) :=
             repeat (case_bool_decide; [ | contradiction]);
             repeat (case_bool_decide; [ contradiction | ]);
             repeat rewrite bv_and_embed_bool_bv_not;
-            repeat rewrite bv_not_bool_to_bv;
+            repeat rewrite not_embed_bool;
             auto
         end.
 
@@ -557,18 +549,18 @@ Tactic Notation "match_innermost_in_hyp" ident(H1) "as" ident(H2) :=
             match ctrl with
             | instrs.Beq rs1 rs2 offset =>
                (forall pc rs1 rs2,
-                  let nextPc := pc + (bv_sign_extend _ offset) in
+                  let nextPc := pc + (bits.of_Z _ (Zmod.signed offset)) in
                   let taken := bool_decide (rs1 = rs2) in
                   execControl (decode inst) pc rs1 rs2
                     = (embed_bool taken, if taken then nextPc else nextPC pc , (embed_bool (taken && negb (semantics.is_word_aligned 4 nextPc)), instrs.encodeExn (instrs.InstructionAddressMisaligned nextPc), nextPc)))
             | instrs.Jalr rd rs1 offset =>
                (forall pc rs1 rs2,
-                  let nextPc := bv_and (rs1 + (bv_sign_extend _ offset)) (bv_not 1) in
+                  let nextPc := Zmod.and (rs1 + (bits.of_Z _ (Zmod.signed offset))) (Zmod.not 1) in
                   execControl (decode inst) pc rs1 rs2
                     = (embed_bool true, nextPc, (embed_bool (negb (semantics.is_word_aligned 4 nextPc)), instrs.encodeExn (instrs.InstructionAddressMisaligned nextPc), nextPc)))
             | instrs.Bne rs1 rs2 offset =>
                (forall pc rs1 rs2,
-                  let nextPc := pc + (bv_sign_extend _ offset) in
+                  let nextPc := pc + (bits.of_Z _ (Zmod.signed offset)) in
                   let taken := bool_decide (rs1 <> rs2) in
                   execControl (decode inst) pc rs1 rs2
                     = (embed_bool taken, if taken then nextPc else nextPC pc, (embed_bool (taken && negb (semantics.is_word_aligned 4 nextPc)), instrs.encodeExn (instrs.InstructionAddressMisaligned nextPc), nextPc)))
@@ -626,14 +618,14 @@ Tactic Notation "match_innermost_in_hyp" ident(H1) "as" ident(H2) :=
             match mem with
             | instrs.Lw rd rs1 offset =>
                 forall rs1Val,
-                  let addr := rs1Val + bv_sign_extend _ offset in
+                  let addr := rs1Val + bits.of_Z _ (Zmod.signed offset) in
                   let isAligned := semantics.is_word_aligned 4 addr in
                   let exnCode := instrs.encodeExn (instrs.LoadAddressMisaligned addr) in
                   memAddr (decode inst) rs1Val =
                     (addr, (embed_bool (negb isAligned), exnCode, addr))
             | instrs.Sw rs1 rs2 offset =>
                 forall rs1Val,
-                  let addr := rs1Val + bv_sign_extend _ offset in
+                  let addr := rs1Val + bits.of_Z _ (Zmod.signed offset) in
                   let isAligned := semantics.is_word_aligned 4 addr in
                   let exnCode := instrs.encodeExn (instrs.StoreAddressMisaligned addr) in
                   memAddr (decode inst) rs1Val =
@@ -648,7 +640,7 @@ Tactic Notation "match_innermost_in_hyp" ident(H1) "as" ident(H2) :=
         unfold decode. cbn.
         rewrite DecodeOk. unfold GetDecoded.
         case_match; auto.
-        case_match; safe_propositional; rewrite bv_not_bool_to_bv; reflexivity.
+        case_match; safe_propositional; rewrite not_embed_bool; reflexivity.
       Qed.
       Ltac fast_cleanup :=
         repeat match goal with

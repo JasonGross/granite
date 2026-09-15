@@ -42,7 +42,7 @@ From granite.isaSpec Require Import
 (* From granite.isaSpec Require MultiCycle. *)
 Set Nested Proofs Allowed.
 From quartz.lang Require Syntax domain.
-Import (coercions) domain.BV.
+Import (coercions) domain.Zmod.
 (* TODO: from PipelineRefines *)
 Module PipelineTop.
   Import Pipelined.
@@ -53,7 +53,7 @@ Module PipelineTop.
     Context {bhtSpec: BhtSpec_sig}.
     Context {imemParams: memSpec.SpecParams}.
     Context {dmemParams: memSpec.SpecParams}.
-    Context (isMMIOAddr: mword -> (bv 1)).
+    Context (isMMIOAddr: mword -> (bits 1)).
 
     Definition implMachine' : PubInit -> SecInit -> Machine.machine Input Output :=
       fun pub_init sec_init =>
@@ -96,7 +96,7 @@ Module AbstractMachine.
     Context {mulImplParams: Multiplier.MultiplierParams}.
     Context {imemParams: memSpec.SpecParams}.
     Context {dmemParams: memSpec.SpecParams}.
-    Context (isMMIOAddr: mword -> (bv 1)).
+    Context (isMMIOAddr: mword -> (bits 1)).
 
     Instance MulSpec : MultiplierSpec.SpecParams := 
        @MultiplierSimulates.multiplierParams Pipelined.mulParams mulImplParams.
@@ -125,8 +125,8 @@ Module ConcreteCPU.
     Context {mulImplParams: Multiplier.MultiplierParams}.
     Context {imemParams: memSpec.SpecParams}.
     Context {dmemParams: memSpec.SpecParams}.
-    Context (isMMIOAddr: mword -> bv 1).
-    Notation bit := (bv 1).
+    Context (isMMIOAddr: mword -> bits 1).
+    Notation bit := (bits 1).
     #[projections(primitive=no)]
     Record St : Type :=
       { Pc : mword
@@ -271,7 +271,7 @@ End ConcreteCPU.
 (* Ish. Abstract Memory. *)
 Module ConcreteTop. Section ConcreteTop.
   Context {mulImplParams: Multiplier.MultiplierParams}.
-  Context (isMMIOAddr: mword -> bv 1).
+  Context (isMMIOAddr: mword -> bits 1).
   Context {imemParams: memSpec.SpecParams }.
   Context {dmemParams: memSpec.SpecParams }.
   Context (pub_init: PubInit) (sec_init: SecInit).
@@ -371,14 +371,14 @@ Module Equivalent. Section Equivalent.
   Notation SpecBase :=
     (@Top.top_spec DecodeOut DecodeFieldsOk (params isMMIOAddr)
       AbstractMachine.fifoSpec 
-      (@AbstractMachine.MulSpec mulImplParams) (@BtbSpecParams btbParams)
-      (@BhtSpecParams bhtParams) dmemParams dmemParams pub_init sec_init false).
+      (@AbstractMachine.MulSpec mulImplParams) (@BtbSpecParams btbParams _ _)
+      (@BhtSpecParams bhtParams _ _) dmemParams dmemParams pub_init sec_init false).
   Notation Spec_CPUBase :=
   (@CPU.base AbstractMachine.fifoSpec 
-               (@AbstractMachine.MulSpec mulImplParams) (@BtbSpecParams btbParams)
-               (@BhtSpecParams bhtParams) false (PubInit_pc pub_init) ).
+               (@AbstractMachine.MulSpec mulImplParams) (@BtbSpecParams btbParams _ _)
+               (@BhtSpecParams bhtParams _ _) false (PubInit_pc pub_init) ).
   Notation Impl_CPUBase :=
-    (@ConcreteCPU.base mulImplParams (Bits.zeroes WIDTH)).
+    (@ConcreteCPU.base mulImplParams Bits.zeroes).
 
   Notation SpecCpu := (State Spec_CPUBase).
   Notation ImplCpu := (State Impl_CPUBase).
@@ -485,8 +485,8 @@ Set Printing Coercions.
   Notation SpecBase_Low :=
     (@Top.base DecodeOut DecodeFieldsOk (params isMMIOAddr)
                AbstractMachine.fifoSpec
-               (@AbstractMachine.MulSpec mulImplParams) (@BtbSpecParams btbParams)
-               (@BhtSpecParams bhtParams) dmemParams dmemParams pub_init sec_init false).
+               (@AbstractMachine.MulSpec mulImplParams) (@BtbSpecParams btbParams _ _)
+               (@BhtSpecParams bhtParams _ _) dmemParams dmemParams pub_init sec_init false).
   Notation ImplBase_Low := (ConcreteTop.base isMMIOAddr pub_init sec_init).
 
   Theorem Refines_Low:

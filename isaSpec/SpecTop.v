@@ -19,13 +19,12 @@ From granite.isaSpec Require Import
   IsaParams
   Riscv
   Spec.
-From stdpp.bitvector Require Import tactics.
 (* From granite.isaSpec Require MultiCycle. *)
 Set Nested Proofs Allowed.
-Notation bit := (bv 1).
+Notation bit := (bits 1).
 From quartz Require Syntax.
-Import (coercions) domain.BV.
-Import domain.BV.
+Import (coercions) domain.Zmod.
+Import domain.Zmod.
 Notation Input := ((IFC.PubInput * IFC.SecInput):Type).
 Notation Output := ((IFC.PubOutput * IFC.SecOutput):Type).
 Notation BigOutput := ((IFC.PubOutput * IFC.Output):Type).

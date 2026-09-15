@@ -15,10 +15,10 @@ From granite.isaSpec Require Import
 Import circuitDefs.
 Import instrs.Decode.
 Import enum.
-Open Scope bv_scope.
+Open Scope Zmod_scope.
 From quartz Require Import Syntax domain.
-Import (coercions) BV.
-Import BV.
+Import (coercions) domain.Zmod.
+Import domain.Zmod.
 Definition immType : enum_sig :=
   {| enum_name := "maybe_immType";
      enum_bitsize := 3;
@@ -39,26 +39,26 @@ Definition instType: enum_sig :=
   |}.
 
 Record InstrProps :=
-{ rs1Valid : bv 1;
-  rs2Valid : bv 1;
-  rdValid : bv 1;
+{ rs1Valid : bits 1;
+  rs2Valid : bits 1;
+  rdValid : bits 1;
   itype : instType; 
   immediateType : immType;
 }.
 
 Record DecodeFields : Type :=
-{ DOut_rs1Idx : bv LOG_NREGS;
-  DOut_rs2Idx : bv LOG_NREGS;
-  DOut_rdIdx : bv LOG_NREGS;
+{ DOut_rs1Idx : bits LOG_NREGS;
+  DOut_rs2Idx : bits LOG_NREGS;
+  DOut_rdIdx : bits LOG_NREGS;
   DOut_csrIdx : CsrIdx;
   DOut_immI : mword;
   DOut_immS : mword;
   DOut_immB : mword;
   DOut_immU : mword;
   DOut_csr  : CsrIdx;
-  DOut_opcode : bv 7;
-  DOut_funct3 : bv 3;
-  DOut_funct7 : bv 7;
+  DOut_opcode : bits 7;
+  DOut_funct3 : bits 3;
+  DOut_funct7 : bits 7;
 }.
 
 Record DecodeOut : Type :=
@@ -67,7 +67,7 @@ Record DecodeOut : Type :=
 }.
 
 Notation PC := mword (only parsing).
-Notation ISEXN := (bv 1) (only parsing).
+Notation ISEXN := (bits 1) (only parsing).
 
 (* NB: unoptimized versions *)
 Definition illegalFlds := 
@@ -180,10 +180,10 @@ Definition BNE_prop : InstrProps :=
 
 (* TODO: not optimized *)
 Definition getInstrProps (inst: mword) : InstrProps :=
-  let funct7 : Funct7 := bv_extract 25 7 inst in 
-  let funct3 : Funct3 := bv_extract 12 3 inst in 
-  let opcode : Opcode := bv_extract 0 7 inst in 
-  let csr12 := bv_extract 20 12 inst in 
+  let funct7 : Funct7 := Zmod.slice 25 32 inst in 
+  let funct3 : Funct3 := Zmod.slice 12 15 inst in 
+  let opcode : Opcode := Zmod.firstn 7 inst in 
+  let csr12 := Zmod.slice 20 32 inst in 
   if decide (opcode = opcode_LOAD /\ funct3 = funct3_LW) then
     LW_prop
   else if decide (opcode = opcode_OP_IMM /\ funct3 = funct3_ADDI) then
@@ -223,22 +223,18 @@ Definition decode (inst: mword) : DecodeOut :=
   |}.
 
 Definition getFields (inst: mword) :=
-  {| DOut_opcode := bv_extract 0 7 inst;
-     DOut_rs1Idx := bv_extract 15 5 inst;
-     DOut_rs2Idx := bv_extract 20 5 inst;
-     DOut_rdIdx := bv_extract 7 5 inst;
-     DOut_csrIdx := bv_extract 20 12 inst;
-     DOut_immI  := bv_sign_extend _ (bv_extract 20 12 inst);
-     DOut_immS  := bv_sign_extend _ (bv_concat 12 (bv_extract 25 7 inst) (bv_extract 7 5 inst));
-     DOut_immB := bv_sign_extend _ (bv_concat 13 (bv_concat 12
-                              (bv_concat 8
-                                (bv_concat 2 (bv_extract 31 1 inst) (bv_extract 7 1 inst))
-                                (bv_extract 25 6 inst))
-                              (bv_extract 8 4 inst)) (bv_0 1));
-     DOut_immU := (bv_sign_extend 32 (bv_extract 12 20 inst)) ≪ 12;
-     DOut_csr := bv_extract 20 12 inst;
-     DOut_funct7 := bv_extract 25 7 inst;
-     DOut_funct3 := bv_extract 12 3 inst;
+  {| DOut_opcode := Zmod.firstn 7 inst;
+     DOut_rs1Idx := Zmod.slice 15 20 inst;
+     DOut_rs2Idx := Zmod.slice 20 25 inst;
+     DOut_rdIdx := Zmod.slice 7 12 inst;
+     DOut_csrIdx := Zmod.slice 20 32 inst;
+     DOut_immI  := bits.of_Z _ (Zmod.signed (Zmod.slice 20 32 inst));
+     DOut_immS  := bits.of_Z _ (Zmod.signed (Zmod.app (Zmod.slice 7 12 inst) (Zmod.slice 25 32 inst)));
+     DOut_immB := bits.of_Z _ (Zmod.signed (Zmod.app ((zeroes : bits 1)) (Zmod.app (Zmod.slice 8 12 inst) (Zmod.app (Zmod.slice 25 31 inst) (Zmod.app (Zmod.slice 7 8 inst) (Zmod.slice 31 32 inst))))));
+     DOut_immU := Zmod.slu (bits.of_Z 32 (Zmod.signed (Zmod.slice 12 32 inst))) 12;
+     DOut_csr := Zmod.slice 20 32 inst;
+     DOut_funct7 := Zmod.slice 25 32 inst;
+     DOut_funct3 := Zmod.slice 12 15 inst;
   |}.
 
 Definition getImm (d: DecodeOut) : mword :=
@@ -274,11 +270,11 @@ Definition execALU (D: DecodeOut) (rs1val rs2val: RegVal) (csrval: CSRVal) (pc: 
                       imm in
     let result :=
       if decide (flds.(DOut_funct3) = funct3_XOR /\ flds.(DOut_funct7) = funct7_XOR) then
-        bv_xor alu_src1 alu_src2
+        Zmod.xor alu_src1 alu_src2
       else if decide (flds.(DOut_funct3) = funct3_SLLI /\ flds.(DOut_funct7) = funct7_SLLI) then
-        bv_shiftl alu_src1 alu_src2
+        Zmod.slu alu_src1 (Zmod.unsigned alu_src2)
       else if decide (flds.(DOut_funct3) = funct3_SRLI /\ flds.(DOut_funct7) = funct7_SRLI) then
-        bv_shiftr alu_src1 alu_src2
+        Zmod.sru alu_src1 (Zmod.unsigned alu_src2)
       else
         alu_src1 + alu_src2
     in
@@ -299,9 +295,9 @@ Definition execControl (D: DecodeOut) (pc: PC)
   let imm := getImm D in 
   if isCtrl then
     if isJALR then
-      let nextPc := bv_and (rs1val + imm) (bv_not 1) in
+      let nextPc := Zmod.and (rs1val + imm) (Zmod.not 1) in
       let isAligned := semantics.is_word_aligned 4 nextPc in 
-      (embed_bool true, nextPc, (bv_not isAligned, instrs.encodeExn 
+      (embed_bool true, nextPc, (Zmod.not isAligned, instrs.encodeExn 
                                         (instrs.InstructionAddressMisaligned nextPc), nextPc))
     else
       let taken :=
@@ -313,7 +309,7 @@ Definition execControl (D: DecodeOut) (pc: PC)
       let nextPc := pc + imm in
       let isAligned := semantics.is_word_aligned 4 nextPc in
       (embed_bool taken, if taken then nextPc else nextPC pc,
-        (bv_and taken (bv_not isAligned), instrs.encodeExn
+        (Zmod.and taken (Zmod.not isAligned), instrs.encodeExn
                                         (instrs.InstructionAddressMisaligned nextPc), nextPc))
   else
     (embed_bool false, nextPC pc, noExn).
@@ -344,7 +340,7 @@ Definition memAddr (D: DecodeOut) (rs1val: RegVal)
                      instrs.encodeExn (instrs.StoreAddressMisaligned addr)
                    else
                      instrs.encodeExn (instrs.LoadAddressMisaligned addr) in
-    (addr, (bv_not isAligned, exnCode, addr))
+    (addr, (Zmod.not isAligned, exnCode, addr))
   else (zeroes, noExn).
 
 Open Scope Z_scope.
@@ -458,8 +454,8 @@ Qed.
             rewrite H in H1
         | H: enum_lookup _ _ = enum_lookup _ _ |- _ =>
             vm_compute in H
-        | H: bv_extract 0 7 _ = _,
-          H1: bv_extract 0 7 _ = _ |- _ =>
+        | H: Zmod.firstn 7 _ = _,
+          H1: Zmod.firstn 7 _ = _ |- _ =>
             rewrite H in H1; vm_compute in H1; try discriminate
         | _ => cbn in *; try discriminate; propositional
         end.
@@ -472,7 +468,7 @@ Lemma IsSys_opcode:
   forall instr, 
   itype (getInstrProps instr) <> enum_lookup instType "illegal" ->
   IsSys (itype (getInstrProps instr )) = true <->
-  bv_extract 0 7 instr = opcode_SYSTEM.
+  Zmod.firstn 7 instr = opcode_SYSTEM.
 Proof.
   unfold getInstrProps. 
   intros. cbv [IsSys].

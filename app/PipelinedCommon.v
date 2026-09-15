@@ -1,5 +1,5 @@
 From stdpp Require Import base finite nmap.
-From stdpp.bitvector Require Import definitions.
+From granite.core Require Import Bits.
 From granite.core Require Import
   Bits
   Program.
@@ -8,16 +8,15 @@ From granite.app Require Import
   PipelinedAPI.                 
 From granite.app Require Import ToyISA.
                  
-Definition log_nregs : N := 3.
-Definition width : N := 16.
-Lemma pfWidthNeZero : width <> 0%N.
+Definition log_nregs : Z := 3.
+Definition width : Z := 16.
+Lemma pfWidthNeZero : width <> 0%Z.
 Proof. cbv; lia. Qed.
 
-Notation mword := (bv width).
+Notation mword := (bits width).
 
-Notation bit := (bv 1).
-Notation regidx := (bv log_nregs).
-Notation zeroes := (bv_0 _).
+Notation bit := (bits 1).
+Notation regidx := (bits log_nregs).
 Notation pass := (Return tt).
 
 
@@ -84,8 +83,8 @@ Section Types.
     { dInst_rs1 : regidx;
       dInst_rs2 : regidx;
       dInst_rd : regidx;
-      dInst_imm : bv 4;
-      dInst_opcode : bv 3;
+      dInst_imm : bits 4;
+      dInst_opcode : bits 3;
       dInst_type : InstrType;
       dInst_rdValid : bool;
     }.
@@ -93,11 +92,11 @@ End Types.
 Section Logic.
   Import ISA.
   Definition decode (inst: mword) : decodedInst :=
-    let opcode := bv_extract 0 3 inst in
-    let src1   := bv_extract 3 3 inst in
-    let src2   := bv_extract 6 3 inst in
-    let dst    := bv_extract 9 3 inst in
-    let imm    := bv_extract 12 4 inst in
+    let opcode := Zmod.firstn 3 inst in
+    let src1   := Zmod.slice 3 6 inst in
+    let src2   := Zmod.slice 6 9 inst in
+    let dst    := Zmod.slice 9 12 inst in
+    let imm    := Zmod.slice 12 16 inst in
     let instr_type :=
       if bool_decide (opcode = ISA.Encoding.opcode_Lw) then
         MemInstr false 
@@ -121,23 +120,23 @@ Section Logic.
 
   Definition execALU (inst: decodedInst) (rval1 rval2: mword) : mword :=
     if decide (inst.(dInst_opcode) = ISA.Encoding.opcode_Add) then
-      bv_add rval1 rval2
+      Zmod.add rval1 rval2
     else if decide (inst.(dInst_opcode) = ISA.Encoding.opcode_Addi) then
-      bv_add rval1 (bv_sign_extend _ inst.(dInst_imm))
+      Zmod.add rval1 (bits.of_Z _ (Zmod.signed inst.(dInst_imm)))
     else
       zeroes.
   Definition execControl (inst: decodedInst) (pc: mword) (rval1 rval2: mword)
     : bool * mword (* taken or not taken *) :=
-    let default := bv_add pc (of_Z width 1) in
+    let default := Zmod.add pc (bits.of_Z width 1) in
     if decide (inst.(dInst_opcode) = ISA.Encoding.opcode_Beq) then
-      let target := bv_add pc (bv_sign_extend _ inst.(dInst_imm)) in
+      let target := Zmod.add pc (bits.of_Z _ (Zmod.signed inst.(dInst_imm))) in
       let taken := bool_decide (rval1 = rval2) in
       (taken, if taken then target else (default))
     else
       (false, default).
 
   Definition memAddr (inst: decodedInst) (rval1: mword) : mword :=
-    bv_add rval1 (bv_sign_extend _ inst.(dInst_imm)).
+    Zmod.add rval1 (bits.of_Z _ (Zmod.signed inst.(dInst_imm))).
  
   (* Each instruction leaks:
      - the instruction itself
@@ -150,7 +149,7 @@ Section Logic.
     leak_taken: bool; (* false if not a branch *)
     leak_nextPC: mword;
     leak_mul_zero: option bool;
-    leak_dmem_addr: option (bv width)
+    leak_dmem_addr: option (bits width)
   }.
   Instance eta_instr_leak_t : Settable _ := 
     settable! Build_instr_leak_t<leak_taken; leak_nextPC; leak_mul_zero; leak_dmem_addr>.

@@ -12,7 +12,7 @@ Import RecordSetNotations.
 Module registerFile.
   Definition RegFile := vec mword NREGS.
   Definition readReg (reg: Register) (rf: RegFile) : mword :=
-    if decide (reg = bv_0 _) then bv_0 _
+    if decide (reg = zeroes) then zeroes
     else rf !!! (encode_fin reg).
 
   Definition writeReg (reg: Register) (value: mword) (rf: RegFile) : RegFile :=
@@ -24,7 +24,7 @@ Module csrs.
   Definition CsrFile := stringmap mword.
 
   Definition readCsr (csr: Csr) (csrs: CsrFile) : mword :=
-    default (bv_0 _) (csrs !! (pretty csr)).
+    default zeroes (csrs !! (pretty csr)).
 
   Definition writeCsr (csr: Csr) (val: mword) (csrs: CsrFile) :=
     <[ pretty csr := val ]> csrs. 

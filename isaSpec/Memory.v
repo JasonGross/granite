@@ -30,9 +30,9 @@ Module baseMem.
     end.
 
   Definition LoadWord (addr: mword) (mem: Mem) : mword :=
-    Z_to_bv _ (little_endian_to_bv 8 (load_bytes (to_N addr) 4 mem)).
+    bits.of_Z _ (little_endian_to_bits 8 (load_bytes (to_N addr) 4 mem)).
   Definition StoreWord (addr: mword) (v: mword) (mem: Mem) : Mem :=
-    store_bytes (to_N addr) (bv_to_little_endian 4 8 (bv_unsigned v)) mem.
+    store_bytes (to_N addr) (bits_to_little_endian 4 8 (Zmod.unsigned v)) mem.
 
   Definition init_map (bytes: list Byte) : Nmap Byte :=
     snd (fold_left (fun '(n, map) b => ((n+1)%N, <[ n := b ]> map))
@@ -101,7 +101,7 @@ Module memSpec.
   Import baseMem.
   Import memModuleAPI.
   Section WithContext.
-    Notation addr_t := (bv WIDTH).
+    Notation addr_t := (bits WIDTH).
     Notation memory_t := baseMem.Mem.
 
     Inductive LeakEvent :=

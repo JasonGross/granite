@@ -1,5 +1,5 @@
 From stdpp Require Import base finite nmap.
-From stdpp.bitvector Require Import definitions.
+From granite.core Require Import Bits.
 From RecordUpdate Require Import RecordSet.
 From granite.core Require Import
   Bits
@@ -13,7 +13,6 @@ From granite.app Require Import
 Set Primitive Projections.
 Import RecordSetNotations.
 
-Notation zeroes := (bv_0 _).
 
 (* TODO: re-add leakage *)
 (* Section Leakage. *)
@@ -39,14 +38,14 @@ Notation zeroes := (bv_0 _).
 
 (* Assume sequential memory, here *)
 Module ISA.
-  Notation log_nregs := 3%N.
+  Notation log_nregs := 3%Z.
   Notation nregs := 8%nat.
-  Notation width := 16%N.
-  Notation regidx_sz := 3%N.
-  Notation regidx := (bv regidx_sz).
-  Notation mword := (bv width).
-  Notation imm_size := 4%N.
-  Notation imm_t := (bv imm_size).
+  Notation width := 16%Z.
+  Notation regidx_sz := 3%Z.
+  Notation regidx := (bits regidx_sz).
+  Notation mword := (bits width).
+  Notation imm_size := 4%Z.
+  Notation imm_t := (bits imm_size).
   Notation data_t := mword.
 
   Inductive Instr : Type :=
@@ -68,7 +67,7 @@ Module ISA.
   }.
 
   Notation rfSpec:=
-    (Rf.rfSpec (Val := mword) (initVal := bv_0 _) 
+    (Rf.rfSpec (Val := mword) (initVal := zeroes) 
                (log_nregs := log_nregs)).
 
 
@@ -119,7 +118,7 @@ Module ISA.
     | fetch n => nth n st.(IMem) nop
     end.
 
-  Definition idx_to_register (idx: bv 3) : fin nregs:=
+  Definition idx_to_register (idx: bits 3) : fin nregs:=
     encode_fin idx.
 
   Definition base (initPc: mword) (initMem: Memory.MemSt width) (imem:list Instr) 
@@ -140,7 +139,7 @@ Module ISA.
   (* Notation leakage_event_t := (@leakage_event_t width). *)
   (* Notation io_t := (@io_t width). *)
 
-  Open Scope bv_scope.
+  Open Scope Zmod_scope.
   Local Notation prog := (prog BaseVMethod BaseMethod).
 
   Open Scope prog_scope.
@@ -153,7 +152,7 @@ Module ISA.
         pass 
     | Addi dst src1 imm =>
         v_src1 ← rf (Rf.Read src1);
-        callRf (Rf.Write dst (v_src1 + (bv_sign_extend width imm)));;
+        callRf (Rf.Write dst (v_src1 + (bits.of_Z width (Zmod.signed imm))));;
         pass 
     | Mul dst src1 src2 =>
         v_src1 ← rf (Rf.Read src1);
@@ -165,21 +164,21 @@ Module ISA.
         v_src2 ← rf (Rf.Read src2);
         if decide (v_src1 = v_src2) then
           _pc ← pc Reg.Read;
-          callNextPc (Reg.Write (_pc + (bv_sign_extend width offset)));;
+          callNextPc (Reg.Write (_pc + (bits.of_Z width (Zmod.signed offset))));;
           pass
         else 
           pass
     | Lw dst src1 imm =>
         v_src1 ← rf (Rf.Read src1);
         (* TODO: over/under flow *)
-        let addr := v_src1 + (bv_sign_extend width imm) in
+        let addr := v_src1 + (bits.of_Z width (Zmod.signed imm)) in
         memData ← mem (Memory.Load (to_N addr));
         callRf (Rf.Write dst memData);;
         pass
     | Sw src1 src2 imm =>
         v_src1 ← rf (Rf.Read src1);
         v_src2 ← rf (Rf.Read src2);
-        let addr := v_src1 + (bv_sign_extend width imm) in
+        let addr := v_src1 + (bits.of_Z width (Zmod.signed imm)) in
         callMem (Memory.Store (to_N addr) v_src2);;
         pass
     end.    
@@ -214,24 +213,24 @@ Module ISA.
 
   Module Encoding.
     Open Scope list_bits.
-    Definition opcode_Add : bv 3 := of_N _ 0.
-    Definition opcode_Addi : bv 3 := of_N _ 1.
-    Definition opcode_Mul : bv 3 := of_N _ 2.
-    Definition opcode_Beq : bv 3 := of_N _ 3.
-    Definition opcode_Lw : bv 3 := of_N _ 4.
-    Definition opcode_Sw  : bv 3 := of_N _ 5.
+    Definition opcode_Add : bits 3 := of_N _ 0.
+    Definition opcode_Addi : bits 3 := of_N _ 1.
+    Definition opcode_Mul : bits 3 := of_N _ 2.
+    Definition opcode_Beq : bits 3 := of_N _ 3.
+    Definition opcode_Lw : bits 3 := of_N _ 4.
+    Definition opcode_Sw  : bits 3 := of_N _ 5.
 
-    Definition encode_instr_fields (imm: bv 4) (dst: bv 3) (src1 src2: bv 3) (op: bv 3) : mword :=
-     bv_concat _ imm (bv_concat 12 (bv_concat 9 dst (bv_concat 6 src2 src1)) op).
-    Definition encode_reg_empty : regidx := bv_0 _.
+    Definition encode_instr_fields (imm: bits 4) (dst: bits 3) (src1 src2: bits 3) (op: bits 3) : mword :=
+     Zmod.app (Zmod.app op (Zmod.app (Zmod.app src1 src2) dst)) imm.
+    Definition encode_reg_empty : regidx := zeroes.
     Definition encode_instr (instr: Instr) : mword :=
      match instr with
      | Add dst src1 src2 =>
-         encode_instr_fields (bv_0 imm_size) (dst) (src1) (src2) opcode_Add
+         encode_instr_fields ((zeroes : bits imm_size)) (dst) (src1) (src2) opcode_Add
      | Addi dst src1 imm =>
          encode_instr_fields (imm) (dst) (src1) encode_reg_empty opcode_Addi
      | Mul dst src1 src2 =>
-         encode_instr_fields (bv_0 imm_size) (dst) (src1) (src2) opcode_Mul
+         encode_instr_fields ((zeroes : bits imm_size)) (dst) (src1) (src2) opcode_Mul
      | Beq src1 src2 offset =>
          encode_instr_fields (offset) encode_reg_empty (src1) (src2) opcode_Beq
      | Lw dst src1 offset =>
@@ -247,7 +246,7 @@ Module ISA.
 
   Declare Scope isa_scope.
   Delimit Scope isa_scope with isa.
-  Notation "'x.' n" := (BV regidx_sz n) (at level 1): isa_scope.
+  Notation "'x.' n" := (bits.of_Z regidx_sz n) (at level 1): isa_scope.
 
 End ISA.
 
@@ -278,9 +277,9 @@ Module ArithTest.
              v_x3 ← rf (Rf.Read x.3);
              return (v_x1, v_x2, v_x3) }} in 
         let '((v_x1, v_x2, v_x3), st') := evalProg (base zeroes ∅ []) _prog st in
-        (bool_decide (v_x1 = 5%bv )
-         && (bool_decide (v_x2 = 10%bv))
-         && (bool_decide (v_x3 = 25%bv))
+        (bool_decide (v_x1 = 5%Zmod )
+         && (bool_decide (v_x2 = 10%Zmod))
+         && (bool_decide (v_x3 = 25%Zmod))
         )) = true.
 
 
@@ -322,12 +321,12 @@ Module MemTest.
              return (v0,v1,v2,v3,v4,v5) 
           }} in
         let '((v0,v1,v2,v3,v4,v5), st') := evalProg (base zeroes ∅ []) prog st in
-             (  (bool_decide (v0 = 0%bv ))
-             && (bool_decide (v1 = 1%bv))
-             && (bool_decide (v2 = 1%bv))
-             && (bool_decide (v3 = 2%bv))
-             && (bool_decide (v4 = 3%bv))
-             && (bool_decide (v5 = 5%bv))
+             (  (bool_decide (v0 = 0%Zmod ))
+             && (bool_decide (v1 = 1%Zmod))
+             && (bool_decide (v2 = 1%Zmod))
+             && (bool_decide (v3 = 2%Zmod))
+             && (bool_decide (v4 = 3%Zmod))
+             && (bool_decide (v5 = 5%Zmod))
              )) = true.
 End MemTest.
 

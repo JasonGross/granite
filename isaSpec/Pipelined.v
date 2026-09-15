@@ -32,19 +32,19 @@ From granite.app Require Import
   MultiplierSpec
   RfScored.
 From quartz.lang Require Syntax.
-Import (coercions) domain.BV.
-Import domain.BV.
+Import (coercions) domain.Zmod.
+Import domain.Zmod.
 Import circuitDefs.
 Import memModuleAPI.
 
-Open Scope bv_scope.
+Open Scope Zmod_scope.
 Notation fifo1_first := Fifo1API.First.
 Notation fifo1_empty := Fifo1API.Empty.
 Notation fifo1_full := Fifo1API.Full.
 Notation fifo1_deq := Fifo1API.Deq.
 Notation fifo1_enq := Fifo1API.Enq.
 
-Lemma pfWidthNeZero : WIDTH <> 0%N. Proof. discriminate. Qed.
+Lemma pfWidthNeZero : WIDTH <> 0%Z. Proof. discriminate. Qed.
 Instance mulParams : MultiplierAPI.Params.Params :=
   {| Params.width := WIDTH;
      Params.pfWidthNeZero := pfWidthNeZero
@@ -60,20 +60,20 @@ Instance bhtParams : Bht_sig :=
      BhtAPI.addr_sz := WIDTH 
   |}.
 Notation rfScoredSpec :=
-      (rfScoredSpec (Val := mword) (initVal := bv_0 _) 
+      (rfScoredSpec (Val := mword) (initVal := zeroes) 
                                  (log_nregs := LOG_NREGS)).
-Definition eqBits {n} (a b: bv n) : bv 1 := 
-  bool_to_bv _ (bv_unsigned a =? bv_unsigned b)%Z.
-Definition isZero {n} (a: bv n) : bv 1 :=
-   bool_to_bv _ (bv_unsigned a =? 0 )%Z.
+Definition eqBits {n} (a b: bits n) : bits 1 := 
+  mk_bit (Zmod.unsigned a =? Zmod.unsigned b)%Z.
+Definition isZero {n} (a: bits n) : bits 1 :=
+   mk_bit (Zmod.unsigned a =? 0 )%Z.
    
 Module Types.
   Record f2d_bookkeeping :=
     { f2d_pc : mword;
       f2d_ppc : mword;
-      f2d_epoch : bv 1;
-      f2d_depoch: bv 1;
-      f2d_iepoch: bv 1;
+      f2d_epoch : bits 1;
+      f2d_depoch: bits 1;
+      f2d_iepoch: bits 1;
     }.
   #[export] Instance Inhabited_f2d_bookkeeping : Inhabited f2d_bookkeeping.
   Proof. repeat constructor; exact inhabitant. Defined.
@@ -84,8 +84,8 @@ Module Types.
       d2e_csr: mword;
       d2e_pc : mword;
       d2e_ppc : mword;
-      d2e_epoch : bv 1;
-      d2e_iepoch : bv 1;
+      d2e_epoch : bits 1;
+      d2e_iepoch : bits 1;
       d2e_inst : mword
     }.
    #[export] Instance Inhabited_d2e_bookkeeping : Inhabited d2e_bookkeeping.
@@ -95,8 +95,8 @@ Module Types.
     { e2w_alu : mword;
       e2w_csr : mword;
       e2w_inst : mword;
-      e2w_exnInfo : (bv 1 * mword * mword * mword);
-      e2w_isMMIO : bv 1;
+      e2w_exnInfo : (bits 1 * mword * mword * mword);
+      e2w_isMMIO : bits 1;
       e2w_nextPc : mword (* for interrupts *)
     }.
    #[export] Instance Inhabited_e2w_bookkeeping : Inhabited e2w_bookkeeping.
@@ -131,7 +131,7 @@ Module CPU.
     Instance eta_GhostSt : Settable _ :=
       settable! Build_GhostSt<fetchProgress; decodeProgress; execProgress; wbProgress; mmioProgress; leakageInfo>.
 
-    Notation bit := (bv 1).
+    Notation bit := (bits 1).
 
     Inductive BaseVM : Type -> Type := 
     | getPc : BaseVM mword
@@ -194,7 +194,7 @@ Module CPU.
     Definition fetch_stage : prog bool :=
       toIMem_full ← toIMem fifo1_full;
       f2d_full ← f2d fifo1_full;
-      if bv_or toIMem_full f2d_full : bool then
+      if Zmod.or toIMem_full f2d_full : bool then
         return false 
       else
         _pc ← getPc;
@@ -228,12 +228,12 @@ Module CPU.
       let inst := imem_resp.(mem_resp_data) in 
       let D := decode inst in
       let D_flds := decodeFields D in  
-      if bv_or fromIMem_empty f2d_empty : bool then
+      if Zmod.or fromIMem_empty f2d_empty : bool then
         return false (* Nothing to do *)
       (* Can we just not check the imem address and assume resps are correct? *)
-      else if bv_and (bv_and (bv_unsigned f2d_book.(f2d_epoch) =? bv_unsigned _epoch)%Z 
-                             (bv_unsigned f2d_book.(f2d_depoch) =? bv_unsigned _depoch)%Z)
-                     (bv_unsigned f2d_book.(f2d_iepoch) =? bv_unsigned _iepoch)%Z : bool  then
+      else if Zmod.and (Zmod.and (Zmod.unsigned f2d_book.(f2d_epoch) =? Zmod.unsigned _epoch)%Z 
+                             (Zmod.unsigned f2d_book.(f2d_depoch) =? Zmod.unsigned _depoch)%Z)
+                     (Zmod.unsigned f2d_book.(f2d_iepoch) =? Zmod.unsigned _iepoch)%Z : bool  then
         let rs1_idx := D_rs1Idx D_flds in 
         let rs2_idx := D_rs2Idx D_flds in 
         let rd_idx := D_rdIdx D_flds in 
@@ -241,15 +241,15 @@ Module CPU.
         locked1 ← rf (RfScored.IsLocked rs1_idx);
         locked2 ← rf (RfScored.IsLocked rs2_idx);
         locked_rd ← rf (RfScored.IsLocked rd_idx); (* TODO: remove this. Need scoreboard to count up to two. *)
-        if bv_or (bv_or d2e_full (bv_or (bv_or locked1 locked2) locked_rd))
-                 (bv_and (D_isSys D_flds) e2w_full) : bool then
+        if Zmod.or (Zmod.or d2e_full (Zmod.or (Zmod.or locked1 locked2) locked_rd))
+                 (Zmod.and (D_isSys D_flds) e2w_full) : bool then
           return false (* stall *)
         else
           rs1 ← rf (RfScored.Read rs1_idx);
           rs2 ← rf (RfScored.Read rs2_idx);
           csr_val ← getCSR (D_csrIdx D_flds);
           let imm := D_imm D_flds in 
-          bht_ppcDP ← bht (BhtAPI.PpcDP f2d_book.(f2d_pc) (bv_add f2d_book.(f2d_pc) (imm)));
+          bht_ppcDP ← bht (BhtAPI.PpcDP f2d_book.(f2d_pc) (Zmod.add f2d_book.(f2d_pc) (imm)));
           (* TODO: JALR *)
           let ppcDP := if D_isCtrl D_flds : bool then bht_ppcDP else f2d_book.(f2d_ppc) in
           let dbook := {| d2e_rval1 := rs1;
@@ -264,11 +264,11 @@ Module CPU.
           f2d_ fifo1_deq;;
           fromIMem_ fifo1_deq;;
           d2e_ (fifo1_enq dbook);;
-          let/prog _ := (if ((bv_unsigned ppcDP =? bv_unsigned f2d_book.(f2d_ppc))%Z) : bool then
+          let/prog _ := (if ((Zmod.unsigned ppcDP =? Zmod.unsigned f2d_book.(f2d_ppc))%Z) : bool then
                            pass 
                          else
                            setPc ppcDP;;
-                           setDepoch (bv_not _depoch);;
+                           setDepoch (Zmod.not _depoch);;
                            pass) in
           if D_rdValid D_flds : bool then (* NB: r0 invalid *)
             rf_ (RfScored.AcquireLock rd_idx);;
@@ -303,12 +303,12 @@ Module CPU.
           let nextPc := pc + imm in 
           let isAligned := semantics.is_word_aligned 4 nextPc in 
           (embed_bool taken, if taken then nextPc else circuitDefs.nextPC pc, 
-            (bv_and taken (bv_not isAligned), instrs.encodeExn 
+            (Zmod.and taken (Zmod.not isAligned), instrs.encodeExn 
                                             (instrs.InstructionAddressMisaligned nextPc), nextPc))
       | LeakJalr rs1Val =>
-          let nextPc := bv_and (rs1Val + imm) (bv_not 1) in
+          let nextPc := Zmod.and (rs1Val + imm) (Zmod.not 1) in
           let isAligned := semantics.is_word_aligned 4 nextPc in 
-          (embed_bool true, nextPc, (bv_not isAligned, instrs.encodeExn 
+          (embed_bool true, nextPc, (Zmod.not isAligned, instrs.encodeExn 
                                             (instrs.InstructionAddressMisaligned nextPc), nextPc))
       | _ => (embed_bool false, nextPC pc, noExn)
       end.
@@ -316,9 +316,9 @@ Module CPU.
     Definition e2w_exn (inst: mword) (exnCode exnMtval mepc : mword) : e2w_bookkeeping :=
       {| e2w_alu := zeroes;
          e2w_csr := zeroes;
-         e2w_exnInfo := (Z_to_bv _ 1, exnCode, exnMtval, mepc);
+         e2w_exnInfo := (bits.of_Z _ 1, exnCode, exnMtval, mepc);
          e2w_inst := inst;
-         e2w_isMMIO := Z_to_bv _ 0;
+         e2w_isMMIO := bits.of_Z _ 0;
          e2w_nextPc := zeroes
       |}.
     Definition illegalInstruction : mword :=
@@ -327,7 +327,7 @@ Module CPU.
     Definition handleExn (_epoch: bit) (_pc: mword) : prog unit :=
        trapHandlerAddr ← getCSR CSR_mtvec;
        setPc (trapHandlerAddr);;
-       setEpoch (bv_not _epoch);;
+       setEpoch (Zmod.not _epoch);;
        btb_ (BtbAPI.Update _pc trapHandlerAddr);;
        pass.
 
@@ -344,7 +344,7 @@ Module CPU.
           if zero then
             {|input_a := zeroes; input_b := zeroes |} 
           else
-            {|input_a := ones _; input_b := ones _ |} 
+            {|input_a := (Zmod.opp Zmod.one); input_b := (Zmod.opp Zmod.one) |} 
       | _ => 
           (* don't care *)
           {|input_a := zeroes; input_b := zeroes|} 
@@ -362,11 +362,11 @@ Module CPU.
         (* Interrupt *)
         mip ← getMip;
         mie ← getCSR CSR_mie;
-        if (bv_and mip (bv_not (bool_to_bv _ (bv_unsigned mie =? 0)%Z))):bool then
+        if (Zmod.and mip (Zmod.not (mk_bit (Zmod.unsigned mie =? 0)%Z))):bool then
           interruptSrc ← getInterruptSrc;
           (* assert a global pipeline flush *)
           _iepoch ← getIepoch;
-          setIepoch (bv_not _iepoch);;
+          setIepoch (Zmod.not _iepoch);;
           (* d2e_ fifo1_deq;; *)
           handle_interrupt next_pc interruptSrc zeroes 
         else 
@@ -384,7 +384,7 @@ Module CPU.
       (* guard stall *)
       if nonzero d2e_empty then
         return false  (* stall; nothing to do *)
-      else if bv_and (eqBits d2e_book.(d2e_epoch) _epoch)
+      else if Zmod.and (eqBits d2e_book.(d2e_epoch) _epoch)
                      (eqBits d2e_book.(d2e_iepoch) _iepoch) : bool then
         (* correct path *)
         let rval1 := d2e_book.(d2e_rval1) in
@@ -405,7 +405,7 @@ Module CPU.
 
         mulFull ← mul MultiplierAPI.Full;
         e2w_full ← e2w fifo1_full;
-        if bv_or e2w_full (bv_and (D_isMul D_flds) mulFull) : bool then
+        if Zmod.or e2w_full (Zmod.and (D_isMul D_flds) mulFull) : bool then
           return false (* stall *)
         else
           let/prog (ex_book, isExn) :=
@@ -423,7 +423,7 @@ Module CPU.
                                     e2w_exnInfo := (isMemExn, memExnCode, memExnMtval, _pc);
                                     e2w_alu := zeroes;
                                     e2w_csr := zeroes;
-                                    e2w_isMMIO := bv_and (bv_not isMemExn) (isMMIOAddr addr);
+                                    e2w_isMMIO := Zmod.and (Zmod.not isMemExn) (isMMIOAddr addr);
                                     e2w_nextPc := nextPC;
                                  |} in
                  if isMemExn : bool then
@@ -508,11 +508,11 @@ Module CPU.
       let isMem := (D_isMemory D_flds) in 
       let isMul := (D_isMul D_flds) in 
       let '(isExn, exnCode, exnMtval, exnMepc) := e2w_book.(e2w_exnInfo) in 
-      if (bv_or e2w_empty 
-          (bv_and (bv_not isExn) 
-            (bv_or (bv_or (bv_and e2w_book.(e2w_isMMIO) fromMMIO_empty) 
-                          (bv_and (bv_and isMem (bv_not e2w_book.(e2w_isMMIO))) (fromDMem_empty)))
-                    (bv_and isMul (bv_not fromMul_ready))))) : bool then
+      if (Zmod.or e2w_empty 
+          (Zmod.and (Zmod.not isExn) 
+            (Zmod.or (Zmod.or (Zmod.and e2w_book.(e2w_isMMIO) fromMMIO_empty) 
+                          (Zmod.and (Zmod.and isMem (Zmod.not e2w_book.(e2w_isMMIO))) (fromDMem_empty)))
+                    (Zmod.and isMul (Zmod.not fromMul_ready))))) : bool then
         return (false, false) (* Nop *)
       else if isExn : bool then
         e2w_ fifo1_deq;;
@@ -538,7 +538,7 @@ Module CPU.
           else if isMul : bool then
             resp ← mul MultiplierAPI.Peek;
             mul_ MultiplierAPI.Deq;;
-            return (Z_to_bv 32 (bv_unsigned resp), zeroes)
+            return (bits.of_Z 32 (Zmod.unsigned resp), zeroes)
           else 
             return (e2w_book.(e2w_alu), e2w_book.(e2w_csr)) in
         e2w_ fifo1_deq;;
@@ -632,8 +632,8 @@ Module CPU.
             reqEmpty ← (toMem MMIO) fifo1_empty;
             e2w_book ← e2w fifo1_first;
             full ← (fromMem mem) fifo1_full;
-            return nonzero (bv_and (bv_and (isZero full) 
-                                           (bv_and (isZero e2w_empty) e2w_book.(e2w_isMMIO))) reqEmpty)
+            return nonzero (Zmod.and (Zmod.and (isZero full) 
+                                           (Zmod.and (isZero e2w_empty) e2w_book.(e2w_isMMIO))) reqEmpty)
         | _ => full ← (fromMem mem) fifo1_full;
               return nonzero (isZero full)
         end.
@@ -1031,7 +1031,7 @@ End Top.
 
 From granite.isaSpec Require Import 
   IsaParams.                     
-Open Scope bv_scope.
+Open Scope Zmod_scope.
 
 Module Test.
   Definition fifo1Spec (T: Type) (_: Inhabited T): Fifo1Spec.SpecParams (Val := T) :=

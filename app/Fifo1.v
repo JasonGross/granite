@@ -11,7 +11,7 @@ From granite.core Require Import
 From granite.app Require Import
   Fifo1API.
 From quartz.lang Require Syntax domain.
-Import domain.BV.
+Import domain.Zmod.
 Section WithContext.
   Context {Val: Type}.
   Context {initVal: Val}.
@@ -94,12 +94,12 @@ Section WithContext.
         return v
     }|}.
 
-  Definition empty: expr (bv 1) :=
+  Definition empty: expr (bits 1) :=
     {|{ valid ← Valid Read;
         return embed_bool (negb valid)
     }|}.
 
-  Definition full: expr (bv 1) :=
+  Definition full: expr (bits 1) :=
     {|{ valid ← Valid Read;
         return embed_bool valid 
     }|}.

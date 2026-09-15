@@ -64,10 +64,10 @@ Section WithContext.
   Context {params: Params.Params}.
   Context {implParams: MultiplierParams}.
   Definition base := ((RegSpec (Val := bool)               (initVal := false)) ⋆
-                      (RegSpec (Val := bv Params.width) (initVal := bv_0 _)) ⋆
-                      (RegSpec (Val := bv Params.width) (initVal := bv_0 _)) ⋆
-                      (RegSpec (Val := bv (Params.width + Params.width)) (initVal := bv_0 _)) ⋆
-                      (RegSpec (Val := bv logNSteps)    (initVal := bv_0 _)) ⋆
+                      (RegSpec (Val := bits Params.width) (initVal := zeroes)) ⋆
+                      (RegSpec (Val := bits Params.width) (initVal := zeroes)) ⋆
+                      (RegSpec (Val := bits (Params.width + Params.width)) (initVal := zeroes)) ⋆
+                      (RegSpec (Val := bits logNSteps)    (initVal := zeroes)) ⋆
                       (RegSpec (Val := bool)               (initVal := false))
                      )%spec_scope.
   Notation prodSt := base.(State).

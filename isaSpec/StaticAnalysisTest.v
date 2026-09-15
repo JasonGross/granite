@@ -46,7 +46,7 @@ From granite.isaSpec Require Import
         | MemInstr => f_equal
         end
     | |- _ => 
-        try apply bv_eq; reflexivity
+        try apply Zmod.unsigned_inj; reflexivity
     end.
 
   Module Spin.
@@ -147,7 +147,7 @@ From granite.isaSpec Require Import
       repeat match goal with
       | |- ?x = ?y=>
           match type of x with
-          | bv _ => apply bv_eq
+          | bits _ => apply Zmod.unsigned_inj
           end
       | |- _ _ = _ _ => f_equal
       | |- _ :: _ = _ :: _  => f_equal

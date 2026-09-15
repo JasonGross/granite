@@ -35,14 +35,14 @@ From granite.isaSpec Require Import
   StaticAnalysis.
 Import SymbExec.
 From quartz.lang Require Syntax domain.
-Import (coercions) domain.BV.
-Import domain.BV.
+Import (coercions) domain.Zmod.
+Import domain.Zmod.
 Set Printing Coercions.
 Set Nested Proofs Allowed.
 Import PipelineRefines.
 From quartz.examples Require Processor.
 
-Notation bit := (bv 1).
+Notation bit := (bits 1).
 
 
 Module PipelineTopLevelTheorem (PipelineRefinesOk: PipelineRefinesSig). 

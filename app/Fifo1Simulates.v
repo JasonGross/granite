@@ -18,7 +18,7 @@ From granite.app Require
   Fifo1API 
   Fifo1  
   Fifo1Spec.
-Import domain.BV.
+Import domain.Zmod.
 Section WithContext.
   Context [Val: Type].
   Context (initVal: Val).

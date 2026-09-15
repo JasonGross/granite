@@ -10,33 +10,32 @@ Import RecordSetNotations.
 From granite.isaSpec Require Export 
   Combinators.                     
 From quartz Require Import Syntax.
-Import domain.BV.
-Notation zeroes := (zeroes _).
+Import domain.Zmod.
 
 Module enum.
   Record enum_sig :=
   { enum_name: string;
-    enum_bitsize: N;
-    enum_members: stringmap (bv enum_bitsize)
+    enum_bitsize: Z;
+    enum_members: stringmap (bits enum_bitsize)
   }.
   Definition enum_lookup sig idx :=
     sig.(enum_members) !!! idx.
-  Definition enum_denote (ty: enum_sig) : Type := bv ty.(enum_bitsize).
+  Definition enum_denote (ty: enum_sig) : Type := bits ty.(enum_bitsize).
   Coercion enum_denote : enum_sig >-> Sortclass.
 End enum.
 
-Definition LOG_NREGS : N := 5.
+Definition LOG_NREGS : Z := 5.
 Definition NREGS : nat := 32.
-Definition WIDTH : N := 32.
+Definition WIDTH : Z := 32.
 Notation regidx_sz := (LOG_NREGS) (only parsing).
-Definition Register := bv regidx_sz.
-Definition mword := (bv WIDTH).
-Notation Imm12 := (bv 12) (only parsing).
-Notation Imm13 := (bv 13) (only parsing).
-Notation Imm20 := (bv 20) (only parsing).
-Notation Imm21 := (bv 21) (only parsing).
-Definition Byte := (bv 8).
-Notation CsrIdx := (bv 12) (only parsing).
+Definition Register := bits regidx_sz.
+Definition mword := (bits WIDTH).
+Notation Imm12 := (bits 12) (only parsing).
+Notation Imm13 := (bits 13) (only parsing).
+Notation Imm20 := (bits 20) (only parsing).
+Notation Imm21 := (bits 21) (only parsing).
+Definition Byte := (bits 8).
+Notation CsrIdx := (bits 12) (only parsing).
 
 Inductive Csr : Type :=
 | mtvec
@@ -123,15 +122,15 @@ Module semdefs.
 End semdefs.
 
 Definition bin_to_bytes (binary: list mword) : list Byte :=
-  concat (map (fun v => (bv_to_little_endian 4 8 (bv_unsigned v)))
+  concat (map (fun v => (bits_to_little_endian 4 8 (Zmod.unsigned v)))
               binary).
 
 Module circuitDefs.
-  Notation bit := (bv 1).
+  Notation bit := (bits 1).
   Record DecodeOutType :=
-  { D_rs1Idx : bv regidx_sz
-  ; D_rs2Idx : bv regidx_sz
-  ; D_rdIdx  : bv regidx_sz
+  { D_rs1Idx : bits regidx_sz
+  ; D_rs2Idx : bits regidx_sz
+  ; D_rdIdx  : bits regidx_sz
   ; D_csrIdx : CsrIdx
   ; D_imm    : mword
   ; D_rs1Valid : bit
@@ -169,9 +168,9 @@ Module circuitDefs.
   (* }. *)
 
   Notation PC := mword (only parsing).
-  Notation ISEXN := (bv 1) (only parsing).
+  Notation ISEXN := (bits 1) (only parsing).
   Notation RegVal := mword (only parsing).
-  Notation TAKEN := (bv 1) (only parsing).
+  Notation TAKEN := (bits 1) (only parsing).
   Notation EXNCODE := mword (only parsing).
   Notation MTVAL := mword (only parsing).
   Notation ADDR := mword (only parsing).
@@ -185,7 +184,7 @@ Module circuitDefs.
   ; execControl : DecodeOut -> PC (* PC *) -> RegVal (* rs1 *) -> RegVal (* rs2 *) -> TAKEN * PC * (ISEXN * EXNCODE * MTVAL) (* (taken, nextPC, (isExn, exnCode, mtval)) *)
   ; memAddr : DecodeOut -> RegVal -> ADDR * (ISEXN * EXNCODE * MTVAL ) (* isExn, exnCode * mtval *)
   ; illegalInstruction : mword
-  ; isMMIOAddr : ADDR -> bv 1
+  ; isMMIOAddr : ADDR -> bits 1
   ; nextPC : ADDR -> ADDR
   }.
   Arguments IsaParams : clear implicits.
@@ -217,8 +216,8 @@ Module circuitDefs.
 End circuitDefs.
 
 Definition example_isMMIOAddr (addr: mword): bool :=
-  bool_decide (bv_unsigned addr >= 0x40000000 /\
-               bv_unsigned addr <= 0x40000100)%Z.
+  bool_decide (Zmod.unsigned addr >= 0x40000000 /\
+               Zmod.unsigned addr <= 0x40000100)%Z.
 
 
 Inductive LeakT :=
@@ -237,16 +236,16 @@ Inductive LeakageEvent :=
 
 Record mem_req_t :=
   { mem_req_is_store: bool
-  ; mem_req_addr: bv WIDTH 
-  ; mem_req_data: bv WIDTH 
+  ; mem_req_addr: bits WIDTH 
+  ; mem_req_data: bits WIDTH 
   }.
 
 #[export] Instance Inhabited_mem_req_t : Inhabited mem_req_t.
 Proof. repeat constructor; exact inhabitant. Defined.
 
 Record mem_resp_t :=
-  { mem_resp_addr: bv WIDTH;
-    mem_resp_data: bv WIDTH 
+  { mem_resp_addr: bits WIDTH;
+    mem_resp_data: bits WIDTH 
   }.
 #[export] Instance Inhabited_mem_resp_t : Inhabited mem_resp_t.
 Proof. repeat constructor; exact inhabitant. Defined.

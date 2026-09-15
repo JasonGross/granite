@@ -18,7 +18,7 @@ From granite.isaSpec Require Import
   RegisterFile.
 From granite.isaSpec Require Export Riscv.
 From quartz.lang Require Syntax domain.
-Import (coercions) domain.BV.
+Import (coercions) domain.Zmod.
 
 Module semantics.
   Import instrs.
@@ -66,10 +66,10 @@ Module semantics.
        (* Context {R} {semanticsParams: semantic_parameters R}. *)
 
       (* When executing, assume zeroes . *)
-      Open Scope bv_scope.
+      Open Scope Zmod_scope.
 
       Definition is_word_aligned (width: N) (addr: mword) : bool :=
-        bool_decide (bv_and addr (of_N _ width - 1) = 0)%bv.
+        bool_decide (Zmod.and addr (of_N _ width - 1) = 0)%Zmod.
 
       Definition assert_or_error (cond: bool) (err: SoftwareError) : option SoftwareError :=
         if cond then None else Some err.
@@ -88,7 +88,7 @@ Module semantics.
         match instr with
         | Lw rd rs1 offset => 
             let rval1 := readReg rs1 regs in
-            let addr := rval1 + (bv_sign_extend _ offset) in
+            let addr := rval1 + (bits.of_Z _ (Zmod.signed offset)) in
             let err := assert_or_error (is_word_aligned 4 addr) (LoadAddressMisaligned addr) in
             if params.isMMIOAddr addr : bool then
               match err with
@@ -103,7 +103,7 @@ Module semantics.
         | Sw rs1 rs2 offset => 
             let rval1 := readReg rs1 regs in 
             let rval2 := readReg rs2 regs in 
-            let addr := rval1 + (bv_sign_extend _ offset) in 
+            let addr := rval1 + (bits.of_Z _ (Zmod.signed offset)) in 
             let err := assert_or_error (is_word_aligned 4 addr) (StoreAddressMisaligned addr) in
             if params.isMMIOAddr addr : bool then
               match err with
@@ -125,7 +125,7 @@ Module semantics.
         match instr with 
         | Addi rd rs1 imm12 =>
             let rval1 := readReg rs1 regs in 
-            (writeReg rd (rval1 + (bv_sign_extend _ imm12)) regs, csrs, None)
+            (writeReg rd (rval1 + (bits.of_Z _ (Zmod.signed imm12))) regs, csrs, None)
         | Add rd rs1 rs2 => 
             let rval1 := readReg rs1 regs in 
             let rval2 := readReg rs2 regs in 
@@ -139,20 +139,20 @@ Module semantics.
             let rval1 := readReg rs1 regs in 
             (writeReg rd csrVal regs, writeCsr csr rval1 csrs, None)
         | Auipc rd offset =>
-            let newPc := pc + ((bv_sign_extend 32 offset) ≪ 12) in
+            let newPc := pc + (Zmod.slu (bits.of_Z 32 (Zmod.signed offset)) 12) in
             (writeReg rd newPc regs, csrs, None)
         | Xor rd rs1 rs2 =>
             let rval1 := readReg rs1 regs in
             let rval2 := readReg rs2 regs in
-            (writeReg rd (bv_xor rval1 rval2) regs, csrs, None)
+            (writeReg rd (Zmod.xor rval1 rval2) regs, csrs, None)
         | Slli rd rs1 shamt =>
             let rval1 := readReg rs1 regs in
-            (writeReg rd (bv_shiftl rval1 (bv_zero_extend 32 shamt)) regs, csrs, None)
+            (writeReg rd (Zmod.slu rval1 (Zmod.unsigned shamt)) regs, csrs, None)
         | Srli rd rs1 shamt =>
             let rval1 := readReg rs1 regs in
-            (writeReg rd (bv_shiftr rval1 (bv_zero_extend 32 shamt)) regs, csrs, None)
+            (writeReg rd (Zmod.sru rval1 (Zmod.unsigned shamt)) regs, csrs, None)
         | Lui rd imm20 =>
-            (writeReg rd ((bv_sign_extend 32 imm20) ≪ 12) regs, csrs, None)
+            (writeReg rd (Zmod.slu (bits.of_Z 32 (Zmod.signed imm20)) 12) regs, csrs, None)
         end.
 
       Definition execCtrl (st: ArchState) (instr: ControlInstr) 
@@ -163,7 +163,7 @@ Module semantics.
             let rval1 := readReg rs1 regs in 
             let rval2 := readReg rs2 regs in 
             if bool_decide (rval1 = rval2) then
-              let target := st.(Pc) + ((bv_sign_extend 32 offset)) in
+              let target := st.(Pc) + ((bits.of_Z 32 (Zmod.signed offset))) in
               let err := assert_or_error (is_word_aligned 4 target)
                                          (InstructionAddressMisaligned target) in 
               (st <| Pc := target |>, err)
@@ -172,7 +172,7 @@ Module semantics.
         | Jalr rd rs1 offset =>
             let rval1 := readReg rs1 regs in
             let link_address := nextPc st.(Pc) in
-            let target := bv_and (rval1 + bv_sign_extend _ offset) (bv_not 1) in
+            let target := Zmod.and (rval1 + bits.of_Z _ (Zmod.signed offset)) (Zmod.not 1) in
             let err := assert_or_error (is_word_aligned 4 target)
                                        (InstructionAddressMisaligned target) in
             (st <| Rf ::= writeReg rd link_address |>
@@ -182,7 +182,7 @@ Module semantics.
             let rval1 := readReg rs1 regs in
             let rval2 := readReg rs2 regs in
             if bool_decide (rval1 <> rval2) then
-              let target := st.(Pc) + (bv_sign_extend 32 offset) in
+              let target := st.(Pc) + (bits.of_Z 32 (Zmod.signed offset)) in
               let err := assert_or_error (is_word_aligned 4 target)
                                          (InstructionAddressMisaligned target) in
               (st <| Pc := target |>, err)

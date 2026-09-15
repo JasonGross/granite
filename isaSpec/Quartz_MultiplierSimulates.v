@@ -1,4 +1,3 @@
-From stdpp Require Import bitvector.tactics.
 From stdpp Require Import base tactics.
 From RecordUpdate Require Import RecordSet.
 From granite.core Require Import
@@ -25,7 +24,7 @@ From granite.isaSpec Require Import QuartzLib Pipelined.
 From Stdlib Require Import ZArith.
 Import InterfaceExample.
 Import type.
-Import BV.
+Import domain.Zmod.
 From Ltac2 Require Import Ltac2 Array Constr Printf Proj Ind. Set Default Proof Mode "Classic". Module UConstr := Constr.Unsafe.
 
 Section WithContext.
@@ -74,9 +73,9 @@ Section WithContext.
     match ev with
     | LeakEnq zero_arg =>
         Enq (if zero_arg then
-               {| input_a := bv_0 _; input_b := bv_0 _ |}
+               {| input_a := zeroes; input_b := zeroes |}
              else
-               {| input_a := of_Z _ 1; input_b := of_Z _ 1 |})
+               {| input_a := bits.of_Z _ 1; input_b := bits.of_Z _ 1 |})
     | LeakDeq => Deq
     | LeakTick => Tick
     end.
@@ -84,7 +83,7 @@ Section WithContext.
   Definition evalLeakageTrace (tr: MultiplierSpec.leakage_trace_t) : qst :=
     evalITrace (map lift_leakage_event tr).
 
-  Definition default_peek (tr: MultiplierSpec.trace_t) : bv (32 + 32) :=
+  Definition default_peek (tr: MultiplierSpec.trace_t) : bits (32 + 32) :=
     (fn.interp (Multiplier.peek _ mul_impl) (evalITrace tr)).
 
   Definition resp_ready (leakage: MultiplierSpec.leakage_trace_t) : bool :=
@@ -129,8 +128,8 @@ Section WithContext.
     (evalLeakageTrace (MultiplierSpec.leakage spec.(hist))).
 
   Definition shortCircuitEqQ (qs pubQs: qst) :=
-    (qs.(multiplier.op1 _ ) = bv_0 _ \/ qs.(multiplier.op2 _) = bv_0 _ ) <->
-    (pubQs.(multiplier.op1 _ ) = (bv_0 _) \/ pubQs.(multiplier.op2 _) = bv_0 _).
+    (qs.(multiplier.op1 _ ) = zeroes \/ qs.(multiplier.op2 _) = zeroes ) <->
+    (pubQs.(multiplier.op1 _ ) = zeroes \/ pubQs.(multiplier.op2 _) = zeroes).
 
   Inductive RelCore (qs: qst) (spec: spec_st_t) : Prop :=
   | CaseEmpty
@@ -158,8 +157,8 @@ Section WithContext.
   Set Printing Coercions.
   Ltac solve_bv_eq :=
     match goal with
-    | |- (_: bv _) = (_ :bv _) =>
-        apply bv_eq; reflexivity
+    | |- (_: bits _) = (_ :bits _) =>
+        apply Zmod.unsigned_inj; reflexivity
     end.
 
   Lemma Rel_init : Rel (initialState mul_qspec) (initialState abstract_spec).
@@ -290,29 +289,28 @@ Section WithContext.
 
   Lemma one_neq_zero:
     forall n,
-    (n <> 0)%N ->
-    of_Z n 1 = bv_0 n->
+    (n <> 0)%Z ->
+    bits.of_Z n 1 = (zeroes : bits n)->
     False.
   Proof.
-    intros. apply f_equal with (f := bv_unsigned) in H0.
-    consider of_Z. rewrite bv_0_unsigned in H0.
-    rewrite Z_to_bv_small in H0.
-    - lia.
-    - apply bv_modulus_gt_1 in H. lia.
+    intros n H H0. apply (f_equal Zmod.unsigned) in H0.
+    rewrite unsigned_literal, Zmod.unsigned_of_Z in H0.
+    destruct (Z.le_gt_cases 1 n) as [Hn|Hn].
+    - rewrite Z.mod_small in H0; [lia | pose proof (proj1 (Z.pow_gt_1 2 n ltac:(lia)) ltac:(lia)); lia].
+    - rewrite Z.pow_neg_r, Z.mod_0_r in H0; lia.
   Qed.
   (* Lemma bv_to_bits_eq: *)
   (*   forall n (b: bv n) v, bv_to_bits b = v -> *)
   (*                  bv_unsigned b = (bv_to_bits b). *)
   Lemma bv_mul'_zero:
-    forall m n (op1 op2: bv n),
-    op1 = bv_0 _ \/ op2 = bv_0 _ ->
-    bv_mul' m op1 op2 = bv_0 _.
+    forall m n (op1 op2: bits n),
+    op1 = zeroes \/ op2 = zeroes ->
+    bv_mul' m op1 op2 = zeroes.
   Proof.
-    intros. unfold bv_mul'.
-    destruct H; subst; rewrite @bv_0_unsigned; auto.
-    - cbv. rewrite bv_eq. by rewrite @bv_0_unsigned.
-    - rewrite bv_eq. rewrite @bv_0_unsigned.
-      rewrite Z.mul_comm. auto.
+    intros. unfold bv_mul'. apply Zmod.unsigned_inj.
+    rewrite Zmod.unsigned_of_Z, !unsigned_literal.
+    destruct H; subst; rewrite unsigned_literal, ?Z.mul_0_l, ?Z.mul_0_r.
+    all: destruct (Z.eq_dec (2^m) 0) as [->|]; [apply Z.mod_0_r | apply Z.mod_0_l; assumption].
   Qed.
 
   Lemma EnqOk:
@@ -341,8 +339,7 @@ Section WithContext.
         { simp_qSignalsEq.
           unfold shortCircuitEqQ. cbn.
           destruct arg; simpl.
-          cbv[BV.nonzero BV.embed_bool mk_bit]; simpl.
-          rewrite Z_to_bv_unsigned. simpl.
+          cbv[Zmod.nonzero Zmod.embed_bool mk_bit]; simpl.
           split_and!; auto.
           case_bool_decide as Hzero_arg; cbn; auto; repeat split; try by auto.
           { intros. 
@@ -409,23 +406,23 @@ Section WithContext.
   Hint Rewrite unfold_match_negb : progStep.
 
   Lemma embed_bool_false :
-    embed_bool false = Z_to_bv 1 0. 
+    embed_bool false = 0%Zmod.
   Proof.
-    apply bv_eq. reflexivity.
+    apply Zmod.unsigned_inj. reflexivity.
   Qed.
   Lemma embed_bool_true:
-    embed_bool true = Z_to_bv 1 1. 
+    embed_bool true = 1%Zmod.
   Proof.
-    apply bv_eq. reflexivity.
+    apply Zmod.unsigned_inj. reflexivity.
   Qed.
 
   Lemma bv_unsigned_mk_bit_true:
-    bv_unsigned (mk_bit true) = 1%Z.
+    Zmod.unsigned (mk_bit true) = 1%Z.
   Proof.
     reflexivity.
   Qed.
   Lemma bv_unsigned_mk_bit_false:
-    bv_unsigned (mk_bit false) = 0%Z.
+    Zmod.unsigned (mk_bit false) = 0%Z.
   Proof.
     reflexivity.
   Qed.
@@ -456,11 +453,8 @@ Section WithContext.
         apply CaseEmpty; cbn; mul_simp;
           set (evalLeakageTrace (map leakage_of_AM hist)) as pubSt in *; simpl.
         rewrite embed_bool_false in *. 
-        cbv[nonzero] in *. simpl in *.
-        repeat rewrite Z_to_bv_unsigned. simpl.
-        rewrite bv_and_unsigned. simpl.
-        repeat rewrite Z_to_bv_unsigned. simpl.
-        rewrite bv_not_unsigned. destruct_pairs; simpl in *; subst.
+        cbv[nonzero Zmod.eqb] in *; rewrite ?Zmod.unsigned_0 in *. simpl in *.
+        destruct_pairs; simpl in *; subst.
         destruct_pairs. simpl in *. subst.
         simp_qSignalsEq.
       + (* CaseBusy: valid = true, finished = false → active computation *)
@@ -469,11 +463,11 @@ Section WithContext.
     (*        the bits-arithmetic correspondence lemmas (cf. lower_mul_tick_ok in *)
     (*        QuartzImpl.v for the detailed proof). *)
     (*        We case-split on the Quartz zero-check condition: *)
-        cbv[nonzero] in *.
+        cbv[nonzero Zmod.eqb] in *; rewrite ?Zmod.unsigned_0 in *.
         rewrite embed_bool_true in *.
         rewrite embed_bool_false in *.
-        repeat rewrite bv_and_unsigned. 
-        repeat rewrite Z_to_bv_unsigned. simpl.
+        repeat rewrite bits.unsigned_and. 
+        repeat rewrite Zmod.unsigned_of_Z. simpl.
         rewrite bv_unsigned_mk_bit_true. simpl.
         (* rewrite andb_true_l.  *)
         (* autorewrite with zmod. simpl. *)
@@ -484,18 +478,18 @@ Section WithContext.
             simp_qSignalsEq; destruct_pairs; simpl in *; subst;
             consider shortCircuitEqQ;  simpl.
           { eexists; split; eauto. cbv[handle_req bv_mul']. simpl.
-            rewrite bv_or_unsigned in *.
-            repeat rewrite Z_to_bv_unsigned in *. simpl in *.
+            rewrite bits.unsigned_or in *.
+            repeat rewrite Zmod.unsigned_of_Z in *. simpl in *.
             rewrite negb_true_iff in *.
             rewrite Z.eqb_neq in *.
             unfold not in *.
             rewrite Z.lor_eq_0_iff in *.
             rewrite Decidable.not_and_iff in *.
-            destruct (bv_unsigned b0 =? 0)%Z eqn:Heqb0; 
-              destruct (bv_unsigned b1 =? 0)%Z eqn:Heqb1; 
+            destruct (Zmod.unsigned z0 =? 0)%Z eqn:Heqb0; 
+              destruct (Zmod.unsigned z1 =? 0)%Z eqn:Heqb1; 
               try rewrite Z.eqb_eq in *;
               try rewrite Z.eqb_neq in *;
-              try rewrite bv_eq in *; rewrite bv_0_unsigned in *;
+              try rewrite <-Zmod.unsigned_inj_iff in *; rewrite Zmod.unsigned_0 in *;
               autorewrite with bits in *; propositional.
             { setoid_rewrite Heqb0. reflexivity. }
             { setoid_rewrite Heqb0. reflexivity. }
@@ -505,35 +499,33 @@ Section WithContext.
             rewrite negb_true_iff in *.
             rewrite Z.eqb_neq in *. simpl in *.
             unfold not in *.
-            rewrite bv_or_unsigned in *.
+            rewrite bits.unsigned_or in *.
             rewrite Z.lor_eq_0_iff in *; autorewrite with bits in *.
             rewrite Decidable.not_and_iff in *.
             simpl.
-            cbv[nonzero].
-            repeat rewrite Z_to_bv_unsigned in *. simpl in *.
-            rewrite bv_and_unsigned in *.
-            repeat rewrite Z_to_bv_unsigned in *. simpl in *. simpl.
-            rewrite bv_wrap_small by (unfold bv_modulus; lia). simpl.
+            cbv[nonzero Zmod.eqb]; rewrite ?Zmod.unsigned_0.
+            autorewrite with bits in *. simpl in *.
+            rewrite bits.unsigned_and.
             autorewrite with bits. simpl.
             case_match; auto.
             exfalso.
             rewrite negb_false_iff in *.
             rewrite Z.eqb_eq in *. simpl in *.
-            rewrite bv_or_unsigned in *.
-            destruct (bv_unsigned b3 =? 0)%Z eqn:Heqb3; 
-              destruct (bv_unsigned b4 =? 0)%Z eqn:Heqb4; 
+            rewrite bits.unsigned_or in *.
+            destruct (Zmod.unsigned z3 =? 0)%Z eqn:Heqb3; 
+              destruct (Zmod.unsigned z4 =? 0)%Z eqn:Heqb4; 
               try rewrite Z.eqb_eq in *;
               try rewrite Z.eqb_neq in *;
-              try rewrite bv_eq in *; rewrite bv_0_unsigned in *;
+              try rewrite <-Zmod.unsigned_inj_iff in *; rewrite Zmod.unsigned_0 in *;
               autorewrite with bits in *; simpl in *; propositional; try discriminate;
-              try rewrite bv_eq in *; rewrite bv_0_unsigned in *.
-            destruct (bv_unsigned b0 =? 0)%Z eqn:Heqb0; 
-              destruct (bv_unsigned b1 =? 0)%Z eqn:Heqb1;
-              autorewrite with bits in *; repeat rewrite bv_eq in *;
+              try rewrite <-Zmod.unsigned_inj_iff in *; rewrite Zmod.unsigned_0 in *.
+            destruct (Zmod.unsigned z0 =? 0)%Z eqn:Heqb0; 
+              destruct (Zmod.unsigned z1 =? 0)%Z eqn:Heqb1;
+              autorewrite with bits in *; repeat rewrite <-Zmod.unsigned_inj_iff in *;
               try rewrite Z.eqb_eq in *;
               try rewrite Z.eqb_neq in *;
               try rewrite Heqb0 in *; try rewrite Heqb1 in *;
-              propositional;repeat rewrite bv_0_unsigned in *.
+              propositional;repeat rewrite Zmod.unsigned_0 in *.
             { split_ors_in pfLeakage0; propositional. }
             { split_ors_in pfLeakage0; propositional. }
             { split_ors_in pfLeakage0; propositional. }
@@ -543,14 +535,13 @@ Section WithContext.
           set (evalLeakageTrace (map leakage_of_AM hist)) as pubSt in *; simpl;
             simp_qSignalsEq; destruct_pairs; simpl in *; subst;
             consider shortCircuitEqQ; simpl in *.
-          cbv[nonzero]. repeat rewrite bv_and_unsigned.
-          repeat rewrite Z_to_bv_unsigned in *. simpl in *.
-          rewrite bv_wrap_small by (unfold bv_modulus; lia). simpl.
+          cbv[nonzero Zmod.eqb]; rewrite ?Zmod.unsigned_0.
+          autorewrite with bits in *. simpl in *. repeat rewrite bits.unsigned_and.
           autorewrite with bits. simpl.
-          rewrite bv_or_unsigned in *. simpl.
+          rewrite bits.unsigned_or in *. simpl.
           repeat simpl_match.
-          repeat rewrite bv_eq in *.
-          repeat rewrite bv_0_unsigned in *.
+          repeat rewrite <-Zmod.unsigned_inj_iff in *.
+          repeat rewrite Zmod.unsigned_0 in *.
           rewrite negb_false_iff in *.
           rewrite Z.eqb_eq in *.
           rewrite Z.lor_eq_0_iff in *; autorewrite with bits in *.
@@ -561,19 +552,29 @@ Section WithContext.
           apply CaseBusy; cbn; eauto; mul_simp.
           set (evalLeakageTrace (map leakage_of_AM hist)) as pubSt in *; simpl in *; subst.
           destruct_pairs; simpl in *; subst. consider shortCircuitEqQ.
-          autorewrite with bits in *. simpl in *. simpl_match. simp_qSignalsEq.
+          all: set (E := evalLeakageTrace (map leakage_of_AM hist)) in *; clearbody E;
+            destruct E as (? & ? & ? & ? & ? & ? & ?); cbn in *; subst.
+          autorewrite with bits in *; simpl in *; try reflexivity.
+          all: try simpl_match; simp_qSignalsEq.
           case_match ;propositional; simpl; auto.
           { case_match; simpl; auto.
             { exfalso.
-              cbv in H0. cbv in Hzero.
-              repeat rewrite bv_eq in *.
-              repeat rewrite bv_0_unsigned in *.
-              cbv[nonzero] in *.
-              bash_destruct Hzero; vm_compute in H; try discriminate.
-              bash_destruct H0; simpl in *; propositional; try discriminate;
-                split_ors_in  pfLeakage2; try discriminate.
+              unfold shortCircuitEqQ in pfLeakage1; cbn in pfLeakage1.
+              cbv [nonzero Zmod.eqb] in H0.
+              rewrite bits.unsigned_or, !unsigned_embed_bool in H0, Hzero.
+              rewrite !Zmod.unsigned_0 in H0.
+              destruct (Zmod.unsigned z0 =? 0)%Z eqn:E0, (Zmod.unsigned z1 =? 0)%Z eqn:E1;
+                try discriminate Hzero.
+              do 2 match type of H0 with
+                   | context [(Zmod.unsigned ?a =? 0)%Z] => destruct (Zmod.unsigned a =? 0)%Z eqn:?
+                   end; try discriminate H0.
+              all: repeat match goal with
+                   | H : (Zmod.unsigned _ =? 0)%Z = true |- _ =>
+                       apply Z.eqb_eq in H; apply (Zmod.unsigned_inj _ _ zeroes) in H
+                   end.
+              all: assert (z0 = zeroes \/ z1 = zeroes) as [Hz|Hz] by (apply pfLeakage1; tauto);
+                rewrite Hz, unsigned_literal, Z.eqb_refl in *; discriminate.
             }
-            { split_and!; auto. split; auto. }
           }
           { vm_compute in H. discriminate. }
       + mul_simp.  simpl. 

@@ -1,4 +1,4 @@
-From stdpp Require Import base tactics.
+From stdpp Require Import base tactics finite.
 From RecordUpdate Require Import RecordSet.
 From granite.core Require Import
   Bits 
@@ -13,7 +13,7 @@ From granite.app Require Import BhtAPI BhtImpl BhtSpec.
 Import RecordSetNotations.
 
 Section WithContext.
-  Context {params: Bht_sig}.
+  Context {params: Bht_sig} `{Hfin : Finite (bits idx_sz)}.
 
   Notation concrete_spec := BhtImpl.btb_spec.
   Notation impl_st_t := BhtImpl.St.
@@ -31,7 +31,7 @@ Section WithContext.
     intros; unfold evalITrace. rewrite execTrace_mapApp. reflexivity.
   Qed.
 
-  Definition default_ppcDP (tr: trace_t) (pc targetPc: bv addr_sz) : bv addr_sz :=
+  Definition default_ppcDP (tr: trace_t) (pc targetPc: bits addr_sz) : bits addr_sz :=
     let st := evalITrace tr in
     (EvalVMethod concrete_spec (PpcDP pc targetPc) st).
 

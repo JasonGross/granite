@@ -1,4 +1,4 @@
-From stdpp Require Import base tactics.
+From stdpp Require Import base tactics finite.
 From RecordUpdate Require Import RecordSet.
 From granite.core Require Import
   Bits 
@@ -16,7 +16,7 @@ From granite.app Require Import
 Import RecordSetNotations.
 
 Section WithContext.
-  Context {params: Btb_sig}.
+  Context {params: Btb_sig} `{Hfin : Finite (bits idx_sz)}.
 
   Notation concrete_spec := BtbImpl.btb_spec.
   Notation impl_st_t := BtbImpl.St.
@@ -35,7 +35,7 @@ Section WithContext.
     (* rewrite St_from_to. reflexivity. *)
   Qed.
 
-  Definition default_predPc (tr: trace_t) (pc: bv addr_sz) : bv addr_sz :=
+  Definition default_predPc (tr: trace_t) (pc: bits addr_sz) : bits addr_sz :=
     let st := evalITrace tr in
     (EvalVMethod concrete_spec (PredPc pc) st).
 

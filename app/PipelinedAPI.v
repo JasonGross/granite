@@ -9,8 +9,8 @@ From granite.app Require Import
 
 Module Params.
   Class Params :=
-  { log_nregs : N
-  ; width : N
+  { log_nregs : Z
+  ; width : Z
   }.
 End Params.
 

@@ -20,7 +20,7 @@ From granite.app Require Import
   MultiplierSpec.
 Import RecordSetNotations.
 From quartz.lang Require domain.
-Import domain.BV.
+Import domain.Zmod.
 Section WithContext.
   Context {params: Params.Params}.
   Context {implParams: MultiplierParams}.
@@ -36,9 +36,9 @@ Section WithContext.
      match ev with
      | LeakEnq zero_arg =>
          Enq (if zero_arg then 
-                {| input_a := bv_0 _; input_b := bv_0 _ |}
+                {| input_a := zeroes; input_b := zeroes |}
               else 
-                {| input_a := of_Z _ 1; input_b := of_Z _ 1 |}
+                {| input_a := bits.of_Z _ 1; input_b := bits.of_Z _ 1 |}
              )                     
      | LeakDeq => Deq 
      | LeakTick => Tick
@@ -47,7 +47,7 @@ Section WithContext.
    Definition evalLeakageTrace (tr: leakage_trace_t) : impl_st_t :=
      evalITrace (map lift_leakage_event tr).
 
-   Definition default_peek (tr: trace_t) : bv (Params.width + Params.width) :=
+   Definition default_peek (tr: trace_t) : bits (Params.width + Params.width) :=
      let st := evalITrace tr in
      (concrete_spec.(EvalVMethod) (Peek) st). 
    Definition resp_ready (leakage: leakage_trace_t) : bool :=
@@ -85,8 +85,8 @@ Section WithContext.
      (evalLeakageTrace (leakage spec.(hist)):St).
 
    Definition shortCircuitEq (impl pubImpl: St) :=
-     (impl.(Op1) = bv_0 _ \/ impl.(Op2) = bv_0 _ ) <->
-     (pubImpl.(Op1) = bv_0 _ \/ pubImpl.(Op2) = bv_0 _).
+     (impl.(Op1) = zeroes \/ impl.(Op2) = zeroes ) <->
+     (pubImpl.(Op1) = zeroes \/ pubImpl.(Op2) = zeroes).
 
    Inductive RelCore (impl: St) (spec: spec_st_t) : Prop :=
    | CaseEmpty (pfINotValid: impl.(Valid) = false)
@@ -287,15 +287,15 @@ Section WithContext.
 
    Lemma one_neq_zero:
      forall n,
-     (n <> 0)%N ->
-     of_Z n 1 = bv_0 n ->
+     (n <> 0)%Z ->
+     bits.of_Z n 1 = (zeroes : bits n) ->
      False.
    Proof.
-     intros. apply f_equal with (f := bv_unsigned) in H0. consider of_Z.
-     rewrite bv_0_unsigned in H0.
-     rewrite Z_to_bv_small in H0.
-     - lia.
-     - apply bv_modulus_gt_1 in H. lia.
+     intros n H H0. apply (f_equal Zmod.unsigned) in H0.
+     rewrite unsigned_literal, Zmod.unsigned_of_Z in H0.
+     destruct (Z.le_gt_cases 1 n) as [Hn|Hn].
+     - rewrite Z.mod_small in H0; [lia | pose proof (proj1 (Z.pow_gt_1 2 n ltac:(lia)) ltac:(lia)); lia].
+     - rewrite Z.pow_neg_r, Z.mod_0_r in H0; lia.
    Qed.
    Lemma EnqOk:
      forall (s1 s1': impl_st_t) r s2 arg,
@@ -371,15 +371,14 @@ Section WithContext.
    Hint Rewrite unfold_match_negb: progStep.
 
    Lemma bv_mul'_zero:
-     forall m n (op1 op2: bv n),
-     op1 = bv_0 _ \/ op2 = bv_0 _ ->
-     bv_mul' m op1 op2 = bv_0 _.
+     forall m n (op1 op2: bits n),
+     op1 = zeroes \/ op2 = zeroes ->
+     bv_mul' m op1 op2 = zeroes.
    Proof.
-     intros. unfold bv_mul'.
-     destruct H; subst; rewrite @bv_0_unsigned; auto.
-     - cbv. rewrite bv_eq. by rewrite @bv_0_unsigned.
-     - rewrite bv_eq. rewrite @bv_0_unsigned. 
-       rewrite Z.mul_comm. auto.
+     intros. unfold bv_mul'. apply Zmod.unsigned_inj.
+     rewrite Zmod.unsigned_of_Z, !unsigned_literal.
+     destruct H; subst; rewrite unsigned_literal, ?Z.mul_0_l, ?Z.mul_0_r.
+     all: destruct (Z.eq_dec (2^m) 0) as [->|]; [apply Z.mod_0_r | apply Z.mod_0_l; assumption].
    Qed.
 
    Lemma TickOk:

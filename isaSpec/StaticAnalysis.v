@@ -32,13 +32,13 @@ From granite.isaSpec Require Import
 (* From granite.isaSpec Require MultiCycle. *)
 
 From quartz.lang Require Syntax domain.
-Import (coercions) domain.BV.
-Import domain.BV.
+Import (coercions) domain.Zmod.
+Import domain.Zmod.
 Set Printing Coercions.
 Set Nested Proofs Allowed.
 Import PipelineRefines.
 
-Notation bit := (bv 1).
+Notation bit := (bits 1).
 Module SymbExec.
   Inductive SymbVal {T: Type} := 
   | Secret 
@@ -50,7 +50,7 @@ Module SymbExec.
   Module symb_rf.
     Definition RegFile := vec (SymbVal mword) NREGS.
     Definition readReg (reg: Register) (rf: RegFile) : (SymbVal mword) :=
-      if decide (reg = bv_0 _) then (Public zeroes)
+      if decide (reg = zeroes) then (Public zeroes)
       else rf !!! (encode_fin reg).
   
     Definition writeReg (reg: Register) (value: SymbVal mword) (rf: RegFile) : RegFile :=
@@ -107,14 +107,14 @@ Module SymbExec.
       match (load_bytes (to_N addr) 4 mem) with
       | Secret => Secret 
       | Public bs =>
-        Public (Z_to_bv _ (little_endian_to_bv 8 bs))
+        Public (bits.of_Z _ (little_endian_to_bits 8 bs))
       end.
 
     Definition StoreWord (addr: mword) (v: SymbVal mword) (mem: Mem) : Mem :=
       match v with
       | Secret => store_bytes (to_N addr) [Secret;Secret;Secret;Secret] mem
       | Public bs =>
-        store_bytes (to_N addr) (map Public (bv_to_little_endian 4 8 (bv_unsigned bs))) mem
+        store_bytes (to_N addr) (map Public (bits_to_little_endian 4 8 (Zmod.unsigned bs))) mem
       end.
 
   End symb_mem.
@@ -163,19 +163,19 @@ Module SymbExec.
     match instr with
     | Addi rd rs1 imm12 => 
       let rval1 := readReg rs1 st.(Rf) in 
-      let res := (mapPubSymbVal ((fun v => bv_add v (bv_sign_extend _ imm12))) rval1) in
+      let res := (mapPubSymbVal ((fun v => Zmod.add v (bits.of_Z _ (Zmod.signed imm12)))) rval1) in
       Running (st <| Rf ::= writeReg rd res |>)
     | Add rd rs1 rs2 => 
       let rval1 := readReg rs1 st.(Rf) in 
       let rval2 := readReg rs2 st.(Rf) in 
-      let res := (mapPubSymbVal2 bv_add rval1 rval2) in
+      let res := (mapPubSymbVal2 Zmod.add rval1 rval2) in
       Running (st <| Rf ::= writeReg rd res |>)
     | Mul rd rs1 rs2 => 
       let rval1 := readReg rs1 st.(Rf) in 
       let rval2 := readReg rs2 st.(Rf) in 
       match rval1, rval2 with
       | Public rval1, Public rval2 =>
-        let res := bv_mul rval1 rval2 in
+        let res := Zmod.mul rval1 rval2 in
         Running (st <| Rf ::= writeReg rd (Public res) |>)
       | _, _ => Unsafe
       end
@@ -204,22 +204,22 @@ Module SymbExec.
                     <| Csrs ::= writeCsr csr rval1 |>)
       end
     | Auipc rd offset =>
-      let newPc := st.(Pc) + ((bv_sign_extend 32 offset) ≪ 12) in
+      let newPc := st.(Pc) + (Zmod.slu (bits.of_Z 32 (Zmod.signed offset)) 12) in
       Running (st <| Rf ::= writeReg rd (Public newPc) |>)
     | Xor rd rs1 rs2 =>
       let rval1 := readReg rs1 st.(Rf) in
       let rval2 := readReg rs2 st.(Rf) in
-      Running (st <| Rf ::= writeReg rd (mapPubSymbVal2 bv_xor rval1 rval2) |>)
+      Running (st <| Rf ::= writeReg rd (mapPubSymbVal2 Zmod.xor rval1 rval2) |>)
     | Slli rd rs1 shamt =>
       let rval1 := readReg rs1 st.(Rf) in
       Running (st <| Rf ::= writeReg rd
-        (mapPubSymbVal (fun v => bv_shiftl v (bv_zero_extend 32 shamt)) rval1) |>)
+        (mapPubSymbVal (fun v => Zmod.slu v (Zmod.unsigned shamt)) rval1) |>)
     | Srli rd rs1 shamt =>
       let rval1 := readReg rs1 st.(Rf) in
       Running (st <| Rf ::= writeReg rd
-        (mapPubSymbVal (fun v => bv_shiftr v (bv_zero_extend 32 shamt)) rval1) |>)
+        (mapPubSymbVal (fun v => Zmod.sru v (Zmod.unsigned shamt)) rval1) |>)
     | Lui rd imm20 =>
-      Running (st <| Rf ::= writeReg rd (Public ((bv_sign_extend 32 imm20) ≪ 12)) |>)
+      Running (st <| Rf ::= writeReg rd (Public (Zmod.slu (bits.of_Z 32 (Zmod.signed imm20)) 12)) |>)
     end.
   Definition interrupts_disabled (st: SymbState) : bool :=
     match symb_csrs.readCsr mie st.(Csrs) with
@@ -241,7 +241,7 @@ Module SymbExec.
           match rval1, rval2 with
           | Public rval1, Public rval2 =>
              if bool_decide (rval1 = rval2) then
-               let target := st.(Pc) + ((bv_sign_extend 32 offset)) in
+               let target := st.(Pc) + ((bits.of_Z 32 (Zmod.signed offset))) in
                if semantics.is_word_aligned 4 target then
                  Running (st <| Pc := target |>)
                else Unsafe (* exn *)
@@ -254,7 +254,7 @@ Module SymbExec.
         let link_address := nextPC st.(Pc) in
         match rval1 with
         | Public rval1 =>
-             let target := bv_and (rval1 + bv_sign_extend _ offset) (bv_not 1) in
+             let target := Zmod.and (rval1 + bits.of_Z _ (Zmod.signed offset)) (Zmod.not 1) in
              if semantics.is_word_aligned 4 target then
                Running (st <| Rf ::= writeReg rd (Public link_address) |>
                            <| Pc := target |>)
@@ -267,7 +267,7 @@ Module SymbExec.
         match rval1, rval2 with
         | Public rval1, Public rval2 =>
             if bool_decide (rval1 <> rval2) then
-              let target := st.(Pc) + (bv_sign_extend 32 offset) in
+              let target := st.(Pc) + (bits.of_Z 32 (Zmod.signed offset)) in
               if semantics.is_word_aligned 4 target then
                 Running (st <| Pc := target |>)
               else Unsafe
@@ -283,7 +283,7 @@ Module SymbExec.
         let rval1 := readReg rs1 st.(Rf) in
         match rval1 with
         | Public rval1 =>
-          let addr := rval1 + (bv_sign_extend _ offset) in  
+          let addr := rval1 + (bits.of_Z _ (Zmod.signed offset)) in  
           if semantics.is_word_aligned 4 addr then
             if params.isMMIOAddr addr : bool then
               Running (st <| Rf ::= writeReg rd Secret |>
@@ -301,7 +301,7 @@ Module SymbExec.
        let rval2 := readReg rs2 st.(Rf) in 
        match rval1 with
        | Public rval1 =>
-          let addr := rval1 + (bv_sign_extend _ offset) in  
+          let addr := rval1 + (bits.of_Z _ (Zmod.signed offset)) in  
           if semantics.is_word_aligned 4 addr then
             if params.isMMIOAddr addr : bool then
               Running (st <| Pc ::= nextPC |>)
@@ -426,14 +426,14 @@ Module SymbExec.
                match readReg rs1 (Rf symbSt) with
                | Secret => False
                | Public rval1 =>
-                    params.isMMIOAddr (rval1 + bv_sign_extend WIDTH offset)
+                    params.isMMIOAddr (rval1 + bits.of_Z WIDTH (Zmod.signed offset))
                end
            | Mem (Sw rs1 rs2 offset) => 
                opt = None /\
                match readReg rs1 (Rf symbSt) with
                | Secret => False
                | Public rval1 =>
-                    params.isMMIOAddr (rval1 + bv_sign_extend WIDTH offset)
+                    params.isMMIOAddr (rval1 + bits.of_Z WIDTH (Zmod.signed offset))
                end
            | _ => False
            end
@@ -641,13 +641,13 @@ Module SymbExec.
           cbv[leakage.leakage_of_instr]. simpl.
           split.
           + repeat constructor; auto.
-          + rewrite readReg_zeroes; auto.
+          + auto.
         - split; auto.
           cbv[semantics.stepCtrl semantics.execCtrl].
           repeat rewrite readReg_zeroes.
           repeat rewrite bool_decide_true by auto. 
-          replace (bv_sign_extend 32 zeroes) with (bv_0 32) by (apply bv_eq; reflexivity ).
-          repeat rewrite bv_add_0_r by reflexivity.
+          replace (bits.of_Z 32 (Zmod.signed zeroes)) with ((zeroes : bits 32)) by (apply Zmod.unsigned_inj; reflexivity ).
+          repeat rewrite zeroes_zero, Zmod.add_0_r.
           repeat match goal with
           | H: semantics.is_word_aligned _ _ = true |- _ =>
               rewrite H; simpl
@@ -1088,23 +1088,17 @@ Module SymbExec.
          cbv[semantics.is_word_aligned] in *.
          rewrite bool_decide_eq_true in *.
          cbv[semantics.nextPc].
-         apply bv_eq.
-         repeat rewrite bv_and_unsigned.
-         rewrite bv_add_unsigned.
-         apply bv_eq in H.
-         rewrite bv_and_unsigned in H.
-         assert (Hm : bv_unsigned (of_N WIDTH 4 - 1 : bv WIDTH) = 3%Z) by (vm_compute; reflexivity).
-         assert (Hz : bv_unsigned (0 : bv WIDTH) = 0%Z) by (vm_compute; reflexivity).
-         assert (H4 : bv_unsigned (4 : bv WIDTH) = 4%Z) by (vm_compute; reflexivity).
+         apply (f_equal Zmod.unsigned) in H. apply Zmod.unsigned_inj.
+         rewrite bits.unsigned_and, Zmod.unsigned_add in *.
+         assert (Hm : Zmod.unsigned (of_N WIDTH 4 - 1 : bits WIDTH) = 3%Z) by (vm_compute; reflexivity).
+         assert (Hz : Zmod.unsigned (0 : bits WIDTH) = 0%Z) by reflexivity.
+         assert (H4 : Zmod.unsigned (4 : bits WIDTH) = 4%Z) by reflexivity.
          rewrite Hm, Hz in H. rewrite Hm, Hz, H4.
-         rewrite bv_wrap_land, <- Z.land_assoc.
-         assert (Hones : Z.land (Z.ones (Z.of_N WIDTH)) (3 : Z) = (3 : Z)) by (vm_compute; reflexivity).
-         rewrite Hones.
-         replace (3 : Z) with (Z.ones 2) in H by (vm_compute; reflexivity).
-         replace (3 : Z) with (Z.ones 2) by (vm_compute; reflexivity).
+         replace (3 : Z) with (Z.ones 2) in * by (vm_compute; reflexivity).
          rewrite Z.land_ones in * by lia.
-         simpl in *.
-         lia.
+         rewrite Z.mod_mod_divide by (exists (2 ^ 30)%Z; reflexivity).
+         replace (2 ^ 2)%Z with 4%Z in * by reflexivity.
+         rewrite Z.add_mod, H by lia. reflexivity.
        Qed.
 
        Hint Resolve is_word_aligned_next_pc : Symb.
@@ -1217,7 +1211,7 @@ Module SymbExec.
          destruct v1 as [|w].
          - change [Secret; Secret; Secret; Secret] with (repeat (@Secret Byte) 4) in Hlook.
            eapply byte_sim_store_secrets; [ | exact hbyte | eassumption ].
-           apply length_bv_to_little_endian. lia.
+           apply length_bits_to_little_endian. lia.
          - specialize (hpub w eq_refl); subst w.
            eapply byte_sim_store_bytes; [ exact hbyte | eassumption ].
        Qed.
@@ -1241,7 +1235,7 @@ Module SymbExec.
          - change [Secret; Secret; Secret; Secret] with (repeat (@Secret Byte) 4) in *.
            erewrite byte_sim_load_bytes; [ reflexivity | | eassumption ].
            eapply byte_sim_store_secrets; [ | exact hbyte ].
-           apply length_bv_to_little_endian. lia.
+           apply length_bits_to_little_endian. lia.
          - specialize (hpub w eq_refl); subst w.
            erewrite byte_sim_load_bytes; [ reflexivity | | eassumption ].
            eapply byte_sim_store_bytes. exact hbyte.
@@ -1318,10 +1312,10 @@ Module SymbExec.
                   rewrite bool_decide_eq_true in H
               | H: bool_decide _ = false |- _ =>
                   rewrite bool_decide_eq_false in H
-              | |- context[bv_sign_extend 32 zeroes] =>
-                  replace (bv_sign_extend 32 zeroes) with (bv_0 32)
-                  by (apply bv_eq; reflexivity );
-                  repeat rewrite bv_add_0_r by reflexivity
+              | |- context[bits.of_Z 32 (Zmod.signed zeroes)] =>
+                  replace (bits.of_Z 32 (Zmod.signed zeroes)) with ((zeroes : bits 32))
+                  by (apply Zmod.unsigned_inj; reflexivity );
+                  repeat rewrite zeroes_zero, Zmod.add_0_r
               | H: forall _ _, readReg _ ?rf = Public _ -> registerFile.readReg _ ?rf' = _,
                 H1: readReg _ ?rf = Public _ |- _ =>
                      rewrite H with (1 := H1)

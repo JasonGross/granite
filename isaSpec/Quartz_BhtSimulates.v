@@ -36,7 +36,7 @@ From quartz.lang Require Import
 (*   bits.of_Z _ (bv_unsigned b). *)
 (* Coercion bits_to_bv {z: Z} {n: N} (b: bits z) : bv n := *)
 (*   Z_to_bv _ (Zmod.unsigned b). *)
-Import BV.
+Import domain.Zmod.
 Section WithContext.
   Context {params: Bht_sig}.
   (* Context {lower: interp Val -> Val}. *)
@@ -77,7 +77,7 @@ Section WithContext.
     intros; unfold evalITrace. rewrite execTrace_mapApp. reflexivity.
   Qed.
 
-  Definition default_ppcDP (tr: trace_t) (pc targetPc: bv addr_sz) : bv addr_sz :=
+  Definition default_ppcDP (tr: trace_t) (pc targetPc: bits addr_sz) : bits addr_sz :=
     let st := evalITrace tr in
     (EvalVMethod concrete_spec (PpcDP pc targetPc) st).
 

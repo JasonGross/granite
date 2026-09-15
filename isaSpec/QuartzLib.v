@@ -1,5 +1,5 @@
 From stdpp Require Import base tactics finite strings vector.
-From stdpp.bitvector Require Import definitions.
+From granite.core Require Import Bits.
 
 From quartz.lang Require Import 
   Syntax
@@ -12,7 +12,7 @@ Export type.
 (* Import ZmodBase. *)
 (* Import Bits. *)
 (* Opaque Zmod.of_Z. *)
-Export (coercions) BV.
+Export (coercions) domain.Zmod.
 From Stdlib Require Import NArith.
 
 Create HintDb zmod.

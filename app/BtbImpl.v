@@ -1,5 +1,5 @@
-From stdpp Require Import base.
-From stdpp.bitvector Require Import definitions.
+From stdpp Require Import base finite.
+From granite.core Require Import Bits.
 From RecordUpdate Require Import RecordSet.
 From granite.core Require Import
   Bits
@@ -14,10 +14,10 @@ From granite.app Require Import
 Set Primitive Projections.
 Import RecordSetNotations.
 Section WithContext.
-  Context {params: Btb_sig}.
+  Context {params: Btb_sig} `{Hfin : Finite (bits idx_sz)}.
 
-  Definition targetsSpec := rfSpec (Val := bv addr_sz) (initVal := bv_0 _) (log_nregs := idx_sz).
-  Definition tagsSpec := rfSpec (Val := bv tag_sz) (initVal := bv_0 _) (log_nregs := idx_sz).
+  Definition targetsSpec := rfSpec (Val := bits addr_sz) (initVal := zeroes) (log_nregs := idx_sz).
+  Definition tagsSpec := rfSpec (Val := bits tag_sz) (initVal := zeroes) (log_nregs := idx_sz).
   Definition validSpec := rfSpec (Val := bool) (initVal := false) (log_nregs := idx_sz).
   #[projections(primitive=no)]
   Record St :=
@@ -35,13 +35,13 @@ Section WithContext.
     |}.
 
   Inductive BaseVMethod : Type -> Type := 
-  | _targets : forall {R}, Rf.ValueMethod (Val := bv addr_sz) (log_nregs := idx_sz) R -> BaseVMethod R
-  | _tags : forall {R}, Rf.ValueMethod (Val := bv tag_sz) (log_nregs := idx_sz) R -> BaseVMethod R
+  | _targets : forall {R}, Rf.ValueMethod (Val := bits addr_sz) (log_nregs := idx_sz) R -> BaseVMethod R
+  | _tags : forall {R}, Rf.ValueMethod (Val := bits tag_sz) (log_nregs := idx_sz) R -> BaseVMethod R
   | _valid : forall {R}, Rf.ValueMethod (Val := bool) (log_nregs := idx_sz) R -> BaseVMethod R.
 
   Inductive BaseMethod : Type -> Type := 
-  | targets : forall {R}, Rf.ActionMethod (Val := bv addr_sz) (log_nregs := idx_sz) R -> BaseMethod R
-  | tags : forall {R}, Rf.ActionMethod (Val := bv tag_sz) (log_nregs := idx_sz) R -> BaseMethod R
+  | targets : forall {R}, Rf.ActionMethod (Val := bits addr_sz) (log_nregs := idx_sz) R -> BaseMethod R
+  | tags : forall {R}, Rf.ActionMethod (Val := bits tag_sz) (log_nregs := idx_sz) R -> BaseMethod R
   | valid : forall {R}, Rf.ActionMethod (Val := bool) (log_nregs := idx_sz) R -> BaseMethod R.
 
   Definition evalBaseMethod {A} (m: BaseMethod A) (st: St) : A * St :=
@@ -75,16 +75,16 @@ Section WithContext.
   Notation prog := (prog BaseVMethod BaseMethod).
   Notation expr := (expr BaseVMethod).
   (* TODO: shiftr by 2 *)
-  Definition getIndex (pc: bv addr_sz) : (bv idx_sz) :=
-   (bv_zero_extend idx_sz (pc ≫ of_Z _ 2)).
+  Definition getIndex (pc: bits addr_sz) : (bits idx_sz) :=
+   (bits.of_Z idx_sz (Zmod.unsigned (Zmod.sru pc 2))).
 
-  Definition getTag (pc: bv addr_sz) : (bv tag_sz) :=
-    (bv_extract (addr_sz - tag_sz) tag_sz pc).
+  Definition getTag (pc: bits addr_sz) : (bits tag_sz) :=
+    (Zmod.firstn tag_sz (Zmod.skipn (addr_sz - tag_sz) pc)).
 
-  Definition defaultNextPc (pc: bv addr_sz) : bv addr_sz:=
-      bv_add pc (of_Z addr_sz 4).
+  Definition defaultNextPc (pc: bits addr_sz) : bits addr_sz:=
+      Zmod.add pc (bits.of_Z addr_sz 4).
 
-  Definition predPc (pc: bv addr_sz): expr (bv addr_sz) :=
+  Definition predPc (pc: bits addr_sz): expr (bits addr_sz) :=
     {|{ let index := getIndex pc in
         let tag := getTag pc in
         let/vmet lookup_tag := _tags (Rf.Read index) in
@@ -96,7 +96,7 @@ Section WithContext.
           return (defaultNextPc pc)
     }|}.
 
-  Definition update (pc nextPc: bv addr_sz): prog unit :=
+  Definition update (pc nextPc: bits addr_sz): prog unit :=
     {{ let index := getIndex pc in
        let tag := getTag pc in
        let/vmet lookup_tag := _tags (Rf.Read index) in

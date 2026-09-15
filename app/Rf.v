@@ -1,6 +1,6 @@
 (*! Register file specification *)
 From stdpp Require Import base finite.
-From stdpp.bitvector Require Import definitions.
+From granite.core Require Import Bits.
 From granite.core Require Import
   Array
   Pair
@@ -11,8 +11,8 @@ From granite.core Require Import
 
 Section WithContext.
   Context [Val: Type] [initVal: Val].
-  Context {log_nregs: N}.
-  Notation idx_t := (bv log_nregs).
+  Context {log_nregs: Z} `{Hfin : Finite (bits log_nregs)}.
+  Notation idx_t := (bits log_nregs).
 
   Definition nregs : nat := card idx_t.
   Definition idx_to_register (idx: idx_t) : fin nregs :=

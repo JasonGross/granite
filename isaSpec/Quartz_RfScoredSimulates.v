@@ -1,5 +1,5 @@
 From stdpp Require Import base tactics finite strings vector.
-From stdpp.bitvector Require Import definitions.
+From granite.core Require Import Bits.
 From granite.core Require Import
   Object
   Array
@@ -26,9 +26,9 @@ Import InterfaceExample.
 (*   bits.of_Z _ (bv_unsigned b). *)
 (* Coercion bits_to_bv {z: Z} {n: N} (b: bits z) : bv n := *)
 (*   Z_to_bv _ (Zmod.unsigned b). *)
-Import BV.
+Import domain.Zmod.
 (* TODO: dependent types are annoying *)
-Notation log_nregs  := 5%N.
+Notation log_nregs  := 5%Z.
 
 Section WithContext.
   Context {Val: Type} {initVal: Val}.
@@ -41,21 +41,15 @@ Section WithContext.
   Context {lift_initVal: initVal = lift (default val )}.
   (* Context {log_nregs: N}. *)
 
-  Let lnr : N := log_nregs.
-  Notation idx_t := (bv log_nregs) (only parsing).
+  Let lnr : Z := log_nregs.
+  Notation idx_t := (bits log_nregs) (only parsing).
 
   (* ------------------------------------------------------------------ *)
   (* nregs equality: same number of entries in quartz and concrete specs  *)
   (* ------------------------------------------------------------------ *)
 
-  Lemma nregs_eq : @rfScored.nregs lnr = @RfScored.nregs log_nregs.
-  Proof.
-    unfold rfScored.nregs, RfScored.nregs, card.
-    change (enum (bv log_nregs)) with
-      (Z_to_bv log_nregs <$> seqZ 0 (bv_modulus log_nregs)).
-    rewrite length_fmap, length_seqZ.
-    unfold bv_modulus, lnr. lia.
-  Qed.
+  Lemma nregs_eq : @rfScored.nregs lnr = @RfScored.nregs log_nregs _ _.
+  Proof. vm_compute; reflexivity. Qed.
 
   Notation nr := (@rfScored.nregs lnr).
 
@@ -65,19 +59,19 @@ Section WithContext.
   Notation rfs_abs_spec := 
     (RfScored.rfScoredSpec (Val := Val) (initVal := initVal) (log_nregs := log_nregs)).
 
-  Notation cst := (vec ((bv 1) * Val) nr) (only parsing).
+  Notation cst := (vec ((bits 1) * Val) nr) (only parsing).
 
   (* ------------------------------------------------------------------ *)
   (* Entry-wise correspondence                                            *)
   (* ------------------------------------------------------------------ *)
 
-  Definition raise_entry (e : bv 1 * Val) : bits 1 * type.interp val :=
+  Definition raise_entry (e : bits 1 * Val) : bits 1 * type.interp val :=
     (e.1, lower e.2).
 
-  Definition lower_entry (e : bits 1 * type.interp val) : bv 1 * Val :=
+  Definition lower_entry (e : bits 1 * type.interp val) : bits 1 * Val :=
     (e.1, lift e.2).
 Set Printing Coercions.
-  Lemma lower_raise_cancel (e : bv 1 * Val) :
+  Lemma lower_raise_cancel (e : bits 1 * Val) :
     lower_entry (raise_entry e) = e.
   Proof.
     unfold lower_entry, raise_entry; cbn.
@@ -172,7 +166,7 @@ Set Printing Coercions.
         ((), fn.interp (RfScored.writeAndRelease (rfScored.impl _) (log_nregs := lnr) )
                        (qs, (( idx), lower v)))
     end.
-  Notation bit := (bv 1).
+  Notation bit := (bits 1).
   Definition rfs_qspec : Spec (RfScored.ValueMethod (Val := Val))
                                (RfScored.ActionMethod (Val := Val)) :=
     {| State := qst;
@@ -188,18 +182,18 @@ Set Printing Coercions.
   Definition Rel (qs : qst) (cs : cst) : Prop :=
     (forall idx, (lower_st qs) !!! idx = cs !!! idx).
 
-  (* Lemma lookup_default_array : *)
-  (*   forall f t n idx, *)
-  (*   default_array f t n !!! idx = f t. *)
-  (* Proof. *)
-  (*   intros. induction n; inv_fin idx; [reflexivity | intro i; apply IHn]. *)
-  (* Qed. *)
+  Lemma lookup_default_array :
+    forall f t n idx,
+    default_array f t n !!! idx = f t.
+  Proof.
+    intros. induction n; inv_fin idx; [reflexivity | intro i; apply IHn].
+  Qed.
   Lemma Rel_init : Rel (initialState rfs_qspec) (initialState rfs_abs_spec).
   Proof.
     unfold Rel, lower_st. cbn.
     intros.
-    rewrite vlookup_map. 
-    setoid_rewrite lookup_fun_to_vec.
+    rewrite vlookup_map.
+    rewrite (lookup_default_array default (Pair (Bits 1) val)).
     rewrite lookup_fun_to_vec.
     unfold lower_entry.
     simpl. rewrite lift_initVal. 
@@ -215,25 +209,8 @@ Set Printing Coercions.
   (* nat_to_fin in RfScored.v's Lookup definition.                             *)
   (* ------------------------------------------------------------------ *)
   Lemma fin_to_nat_encode_fin_bv (idx : idx_t) :
-    fin_to_nat (encode_fin idx) = Z.to_nat (bv_unsigned idx).
-  Proof.
-    unfold encode_fin.
-    rewrite fin_to_nat_to_fin.
-    assert (Hfwd : enum (bv 5) !! Z.to_nat (bv_unsigned idx) = Some idx).
-    { unfold enum, bv_finite.
-      rewrite list_lookup_fmap.
-      pose proof (bv_unsigned_in_range 5%N idx) as Hrange.
-      rewrite lookup_seqZ_lt.
-      - simpl. rewrite Z.add_0_l, Z2Nat.id by lia.
-        f_equal.
-        apply Z_to_bv_bv_unsigned.
-      - rewrite Z2Nat.id by lia. lia. }
-    refine (NoDup_lookup _ _ _ _ (NoDup_enum _) _ Hfwd).
-    assert (H := @decode_encode_nat (bv 5) _ finite_countable idx).
-    unfold decode_nat, decode, finite_countable in H.
-    rewrite Nat2Pos.id in H by lia.
-    cbn [Init.Nat.pred] in *.  auto.
-  Qed.
+    fin_to_nat (encode_fin idx) = Z.to_nat (Zmod.unsigned idx).
+  Proof. apply fin_to_nat_encode_fin_Zmod; lia. Qed.
   (* Lemma bv_unsigned_lt_nr (idx : idx_t) : (Z.to_nat (bv_unsigned idx) < nr)%nat. *)
   (* Proof. *)
   (*   unfold nr, rfScored.nregs. *)
@@ -269,20 +246,20 @@ Set Printing Coercions.
   (* Helper: Quartz acquireLock computes as a vector update *)
   Lemma qtz_acquireLock_eq (qs : qst) (idx : idx_t) :
     fn.interp (RfScored.acquireLock (rfScored.impl (log_nregs := lnr) val)) (qs,  idx) =
-    Vector.upd qs (Z.to_nat (bv_unsigned idx))
+    Vector.upd qs (Z.to_nat (Zmod.unsigned idx))
                (fun _ => (embed_bool true,
                           (nth_default (default (Pair Bool val)) (Vector.to_list qs)
-                                       (Z.to_nat (bv_unsigned idx))).2)).
+                                       (Z.to_nat (Zmod.unsigned idx))).2)).
   Proof.
     reflexivity.
   Qed.
 
   Lemma qtz_releaseLock_eq (qs : qst) (idx : idx_t) :
     fn.interp (RfScored.releaseLock (rfScored.impl (log_nregs := lnr) val)) (qs,  idx) =
-    Vector.upd qs (Z.to_nat (bv_unsigned idx))
+    Vector.upd qs (Z.to_nat (Zmod.unsigned idx))
                (fun _ => (embed_bool false,
                           (nth_default (default (Pair Bool val)) (Vector.to_list qs)
-                                       (Z.to_nat (bv_unsigned idx))).2)).
+                                       (Z.to_nat (Zmod.unsigned idx))).2)).
   Proof.
     reflexivity.
   Qed.
@@ -290,8 +267,8 @@ Set Printing Coercions.
   Lemma qtz_writeAndRelease_eq (qs : qst) (idx : idx_t) (v : type.interp val) :
     fn.interp (RfScored.writeAndRelease (rfScored.impl (log_nregs := lnr) val)) (qs, ( idx, v)) =
     if nonzero (nth_default (default (Pair Bool val)) (Vector.to_list qs)
-                                 (Z.to_nat (bv_unsigned idx))).1
-    then Vector.upd qs (Z.to_nat (bv_unsigned idx))
+                                 (Z.to_nat (Zmod.unsigned idx))).1
+    then Vector.upd qs (Z.to_nat (Zmod.unsigned idx))
                     (fun _ => (embed_bool false, v))
     else qs.
   Proof.
@@ -364,7 +341,7 @@ Set Printing Coercions.
 
   Lemma rfScored_get_entry (qs : qst) (cs : cst) (idx : idx_t) :
     Rel qs cs ->
-    List.nth_default (default (Pair (Bits 1) val)) (Vector.to_list qs) (Z.to_nat (bv_unsigned idx)) =
+    List.nth_default (default (Pair (Bits 1) val)) (Vector.to_list qs) (Z.to_nat (Zmod.unsigned idx)) =
     raise_entry (cs !!! encode_fin idx).
   Proof.
     simpl.
@@ -383,7 +360,7 @@ Set Printing Coercions.
   Qed.
   Lemma bool_to_Z_zero:
     forall b,
-    (bool_to_Z (b =? 0) =? 0)%Z = negb (b =? 0)%Z.
+    (Z.b2z (b =? 0) =? 0)%Z = negb (b =? 0)%Z.
   Proof.
     intros. destruct (Z.eqb_spec b 0); try reflexivity.
   Qed.
@@ -395,8 +372,8 @@ Set Printing Coercions.
     EvalVMethod rfs_qspec (Read idx) qs = EvalVMethod rfs_abs_spec (Read idx) cs.
   Proof.
     intros hrel. 
-    unfold read. simpl. unfold LetBlock, nonzero.
-    rewrite bool_to_bv_unsigned by lia.
+    unfold read. simpl. unfold LetBlock, nonzero, Zmod.eqb.
+    rewrite unsigned_embed_bool, Zmod.unsigned_0.
     rewrite rfScored_get_entry with (1 := hrel). 
     unfold raise_entry. cbn. 
     unfold read.
@@ -405,9 +382,9 @@ Set Printing Coercions.
     | |- context[Z.eqb ?x 0%Z] => destruct (Z.eqb_spec x 0%Z)
     end.
     - case_decide; subst; auto.
-      exfalso. apply H. apply bv_eq. auto.
+      exfalso. apply H. apply Zmod.unsigned_inj. auto.
     - case_decide; simpl; subst.
-      + rewrite bv_0_unsigned in *. congruence.
+      + rewrite ?unsigned_literal in *; congruence.
       + rewrite lift_lower_cancel. 
         match goal with
         | |- context[?x !!! ?y] => destruct (x !!! y)
@@ -429,12 +406,12 @@ Set Printing Coercions.
     | |- context[?x !!! ?y] => destruct (x !!! y)
     end. 
     simpl.
-    destruct b; reflexivity.
+    destruct z; reflexivity.
   Qed.
 
   (* Core: after updating same index, Rel is preserved *)
   Lemma Rel_insert (qs : qst) (cs : cst) (idx : idx_t)
-      (qe : bits 1 * type.interp val) (ce : bv 1 * Val) :
+      (qe : bits 1 * type.interp val) (ce : bits 1 * Val) :
     Rel qs cs ->
     lower_entry qe = ce ->
     Rel (vinsert (encode_fin idx) qe qs) (vinsert (encode_fin idx) ce cs).
@@ -453,20 +430,20 @@ Set Printing Coercions.
   (* Helper: convert Quartz upd to vinsert via fin_to_nat_encode_fin_bv *)
   Lemma qtz_upd_to_vinsert (qs : qst) (idx : idx_t)
       (f : bits 1 * type.interp val -> bits 1 * type.interp val) :
-    Vector.upd qs (Z.to_nat (bv_unsigned idx)) f =
+    Vector.upd qs (Z.to_nat (Zmod.unsigned idx)) f =
     vinsert (encode_fin idx) (f (qs !!! encode_fin idx)) qs.
   Proof.
     rewrite <- fin_to_nat_encode_fin_bv. apply vec_upd_eq_vinsert.
   Qed.
   Lemma embed_bool_false :
-    embed_bool false = Z_to_bv 1 0. 
+    embed_bool false = 0%Zmod.
   Proof.
-    apply bv_eq. reflexivity.
+    apply Zmod.unsigned_inj. reflexivity.
   Qed.
   Lemma embed_bool_true:
-    embed_bool true = Z_to_bv 1 1. 
+    embed_bool true = 1%Zmod.
   Proof.
-    apply bv_eq. reflexivity.
+    apply Zmod.unsigned_inj. reflexivity.
   Qed.
 
   Lemma acquireLock_ok (qs qs' : qst) (cs cs' : cst) (idx : idx_t) :

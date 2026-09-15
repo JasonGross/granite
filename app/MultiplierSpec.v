@@ -10,7 +10,7 @@ From granite.core Require Import
 From granite.app Require Import
   MultiplierAPI.
 From quartz.lang Require Syntax domain.
-Import domain.BV.
+Import domain.Zmod.
 Import RecordSetNotations.
 
 (* Extension:
@@ -31,7 +31,7 @@ Section WithContext.
   Definition leakage_trace_t := list LeakEvent.
 
   Class SpecParams :=
-    { default_peek: trace_t -> bv (Params.width + Params.width)
+    { default_peek: trace_t -> bits (Params.width + Params.width)
     ; resp_ready : leakage_trace_t -> bool
     ; is_full : leakage_trace_t -> bool
     }.
@@ -40,7 +40,7 @@ Section WithContext.
  
   Definition leakage_of_AM {A} (m: ActionMethod A) : LeakEvent :=
     match m with
-    | Enq req => LeakEnq (bool_decide (req.(input_a) = bv_0 _ \/ req.(input_b) = bv_0 _))
+    | Enq req => LeakEnq (bool_decide (req.(input_a) = zeroes \/ req.(input_b) = zeroes))
     | Deq => LeakDeq 
     | Tick => LeakTick
     end.
@@ -84,10 +84,10 @@ Section WithContext.
   Definition full (st: st_t) : bool :=
     is_full (leakage st.(hist)).
 
-  Definition handle_req (req: req_t) : bv (Params.width + Params.width) :=
+  Definition handle_req (req: req_t) : bits (Params.width + Params.width) :=
     bv_mul' (Params.width + Params.width) req.(input_a) req.(input_b).
 
-  Definition peek (st: st_t) : bv (Params.width + Params.width) :=
+  Definition peek (st: st_t) : bits (Params.width + Params.width) :=
     if resp_ready (leakage st.(hist)) then
       match st.(reqs) with
       | [] => default_peek st.(hist)

@@ -5,7 +5,7 @@ From granite.core Require Import
 
 Module Params.
   Class Params := {
-    width: N;
+    width: Z;
   }.
 End Params.
 
@@ -14,16 +14,16 @@ Section WithContext.
 
   Record mem_req_t :=
     { mem_req_is_store: bool
-    ; mem_req_addr: bv Params.width
-    ; mem_req_data: bv Params.width
+    ; mem_req_addr: bits Params.width
+    ; mem_req_data: bits Params.width
     }.
 
   #[export] Instance Inhabited_mem_req_t : Inhabited mem_req_t.
   Proof. repeat constructor; exact inhabitant. Defined.
 
   Record mem_resp_t :=
-    { mem_resp_addr: bv Params.width;
-      mem_resp_data: bv Params.width
+    { mem_resp_addr: bits Params.width;
+      mem_resp_data: bits Params.width
     }.
   #[export] Instance Inhabited_mem_resp_t : Inhabited mem_resp_t.
   Proof. repeat constructor; exact inhabitant. Defined.

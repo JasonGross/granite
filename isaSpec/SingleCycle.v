@@ -17,25 +17,25 @@ From granite.isaSpec Require Import
   RegisterFile
   Spec.
 From quartz.lang Require Syntax domain.
-Import domain.BV.
+Import domain.Zmod.
 Import circuitDefs.
 Import memModuleAPI.
 
-Open Scope bv_scope.
+Open Scope Zmod_scope.
 
 Section WithContext.
   Context {DecodeOut: Type}
           {DecodeFields: DecodeOutT DecodeOut}.
   Context {params: @IsaParams DecodeOut}.
 
-  Notation loadCont := (((bv regidx_sz) * mword * mem_req_t
+  Notation loadCont := (((bits regidx_sz) * mword * mem_req_t
                        ):Type) (only parsing).
 
   Notation StepPhase := (StepPhase mword (mem_req_t * mword * mword)).
 
   Inductive BaseVM : Type -> Type :=
   | GetPc : BaseVM mword
-  | GetReg (idx: bv regidx_sz) : BaseVM mword
+  | GetReg (idx: bits regidx_sz) : BaseVM mword
   | GetCSR : CsrIdx -> BaseVM mword
   | FetchInstr : mword -> BaseVM mword
   | GetMMIORespBuffer : BaseVM (list mem_resp_t)
@@ -46,7 +46,7 @@ Section WithContext.
 
   Inductive BaseAM : Type -> Type :=
   | SetPc (pc: mword): BaseAM unit
-  | SetReg (idx: bv regidx_sz) (val: mword) : BaseAM unit
+  | SetReg (idx: bits regidx_sz) (val: mword) : BaseAM unit
   | SetCSR (csr: CsrIdx) (val: mword) : BaseAM unit
   | DMemReq (req: mem_req_t) : BaseAM mem_resp_t
   | SendMMIOReq (req: mem_req_t) : BaseAM unit
@@ -723,8 +723,8 @@ Module Double.
     ; 0xfe000ae3
     ].
   Definition isMMIOAddr (addr: ADDR): bool :=
-  bool_decide (bv_unsigned addr >= 0x40000000 /\
-               bv_unsigned addr <= 0x40000100).
+  bool_decide (Zmod.unsigned addr >= 0x40000000 /\
+               Zmod.unsigned addr <= 0x40000100).
 
   (* Lemma check_decode_ok : *)
   (*   List.map Decode.decode prog__double_bin = prog__double. *)
@@ -827,8 +827,8 @@ Module Fib.
   Definition secInit : SecInit :=
     {| SecInit_dmem := ∅ |}.
   Definition isMMIOAddr (addr: ADDR): bool :=
-    bool_decide (bv_unsigned addr >= 0x40000000 /\
-                 bv_unsigned addr <= 0x40000100).
+    bool_decide (Zmod.unsigned addr >= 0x40000000 /\
+                 Zmod.unsigned addr <= 0x40000100).
   Definition specMachine : 
     Machine.machine (PubInput * SecInput * DriverOut)
          (PubOutput * SecOutput * list LeakageEvent) :=

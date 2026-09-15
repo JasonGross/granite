@@ -1,6 +1,6 @@
 (*! Scored register file implementation *)
 From stdpp Require Import base finite.
-From stdpp.bitvector Require Import definitions.
+From granite.core Require Import Bits.
 From granite.core Require Import
   Array
   Pair
@@ -10,23 +10,23 @@ From granite.core Require Import
   Reg
   Utils.
 From quartz.lang Require Syntax.
-Import domain.BV.
+Import domain.Zmod.
 Section WithContext.
   Context [Val: Type] [initVal: Val].
-  Context {log_nregs: N}.
-  Notation idx_t := (bv log_nregs).
+  Context {log_nregs: Z} `{Hfin : Finite (bits log_nregs)}.
+  Notation idx_t := (bits log_nregs).
 
   Definition nregs : nat := card idx_t.
   Definition idx_to_register (idx: idx_t) : fin nregs :=
     encode_fin idx.
 
   (* true if locked *)
-  Definition base := ArraySpec (RegSpec (Val := ((bv 1) * Val)%type) 
+  Definition base := ArraySpec (RegSpec (Val := ((bits 1) * Val)%type) 
                                         (initVal := (embed_bool false, initVal))) 
                                (nregs).
   Definition st_t := base.(State).
-  Definition baseVMethod := ArrayVMethod (Reg.ValueMethod ((bv 1) * Val)%type) nregs.
-  Definition baseMethod := ArrayMethod (Reg.ActionMethod ((bv 1) * Val)%type) nregs.
+  Definition baseVMethod := ArrayVMethod (Reg.ValueMethod ((bits 1) * Val)%type) nregs.
+  Definition baseMethod := ArrayMethod (Reg.ActionMethod ((bits 1) * Val)%type) nregs.
 
   Inductive ActionMethod : Type -> Type :=
   | AcquireLock (idx: idx_t) : ActionMethod unit
@@ -35,11 +35,11 @@ Section WithContext.
 
   Inductive ValueMethod : Type -> Type :=
   | Read (idx: idx_t) : ValueMethod Val
-  | IsLocked (idx: idx_t) : ValueMethod (bv 1).
+  | IsLocked (idx: idx_t) : ValueMethod (bits 1).
 
-  Definition Lookup (idx: idx_t) : baseVMethod ((bv 1) * Val) := 
+  Definition Lookup (idx: idx_t) : baseVMethod ((bits 1) * Val) := 
     (encode_fin idx, Reg.Read).
-  Definition Write (idx: idx_t) (arg: (bv 1) * Val) : baseMethod unit := 
+  Definition Write (idx: idx_t) (arg: (bits 1) * Val) : baseMethod unit := 
     (encode_fin idx, Reg.Write arg).
 
   Notation expr := (expr baseVMethod).
@@ -47,13 +47,13 @@ Section WithContext.
 
   Open Scope expr_scope.
 
-  Definition isLocked (idx: idx_t): expr (bv 1) :=
+  Definition isLocked (idx: idx_t): expr (bits 1) :=
     let/vmet (b, _) := Lookup idx in
     return b.
 
   (* Programmer's job to check that the entry is not locked before reading. *) 
   Definition read (idx: idx_t) : expr Val :=
-    if decide (idx = bv_0 _) 
+    if decide (idx = zeroes) 
     then return initVal
     else
       let/vmet (_,v) := Lookup idx in

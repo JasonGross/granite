@@ -1,5 +1,5 @@
 From stdpp Require Import base finite.
-From stdpp.bitvector Require Import definitions.
+From granite.core Require Import Bits.
 
 From granite.core Require Import
   Bits

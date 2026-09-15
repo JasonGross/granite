@@ -1,6 +1,6 @@
 (*! Memory specification with silent stores *)
 From stdpp Require Import base finite nmap.
-From stdpp.bitvector Require Import definitions.
+From granite.core Require Import Bits.
 From RecordUpdate Require Import RecordSet.
 From granite.core Require Import
   Bits
@@ -13,8 +13,8 @@ Import RecordSetNotations.
 Section WithContext.
   Context {params: Params.Params}.
   Notation addr_t := N.
-  Notation bv_addr_t := (bv Params.width).
-  Notation data_t := (bv Params.width).
+  Notation bv_addr_t := (bits Params.width).
+  Notation data_t := (bits Params.width).
   Inductive LeakEvent :=
   | LeakEnq (isStore: bool) (addr: bv_addr_t)
   | LeakDeq 

@@ -26,13 +26,12 @@ From granite.isaSpec Require Import
   SingleCycle
   (* PipelineRefines *)
   Spec.
-From stdpp.bitvector Require Import tactics.
 (* From granite.isaSpec Require MultiCycle. *)
 Set Nested Proofs Allowed.
-Notation bit := (bv 1).
+Notation bit := (bits 1).
 From quartz Require Syntax.
-Import (coercions) domain.BV.
-Import domain.BV.
+Import (coercions) domain.Zmod.
+Import domain.Zmod.
 Module PipelineRefines.
   
   (* TODO: Replace with machine from PipelineRefines *)

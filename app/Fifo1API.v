@@ -11,8 +11,8 @@ Section WithContext.
   
   Inductive ValueMethod : Type -> Type :=
   | First : ValueMethod Val
-  | Empty : ValueMethod (bv 1)
-  | Full : ValueMethod (bv 1).
+  | Empty : ValueMethod (bits 1)
+  | Full : ValueMethod (bits 1).
   
 End WithContext.
 
