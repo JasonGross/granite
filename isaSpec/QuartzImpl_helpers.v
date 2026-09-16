@@ -1,7 +1,7 @@
 From stdpp Require Import base finite nmap stringmap vector.
 From granite.core Require Import Bits.
 From quartz.lang Require Import domain Syntax. (* Import (coercions) domain.Zmod. *)
-From quartz.lang Require Import ident_to_string let_lift.
+From quartz.lang Require Import ident_to_string.
 From quartz.examples Require Import Processor.
 Import type.
 From granite.core Require Import

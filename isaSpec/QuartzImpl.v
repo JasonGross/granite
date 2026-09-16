@@ -334,13 +334,13 @@ Ltac split_pairs :=
   | |- _ /\ _ => split ; auto
   end.
 Opaque cpu.Mem_req_t.
-Opaque fifo1.impl. 
 Opaque Zmod.of_Z.
-Opaque btb.impl.
-Opaque bht.impl.
-Opaque rfScored.impl.
-Opaque csrFile.impl.
-Opaque multiplier.impl.
+Opaque fifo1.full fifo1.empty fifo1.enq fifo1.first fifo1.deq.
+Opaque btb.update btb.predPc.
+Opaque bht.update bht.ppcDp.
+Opaque rfScored.isLocked rfScored.read rfScored.acquireLock rfScored.releaseLock rfScored.writeAndRelease.
+Opaque csrFile.readCsr csrFile.writeCsr.
+Opaque multiplier.full multiplier.enq multiplier.tick multiplier.deq multiplier.peek multiplier.respReady.
 (* Import Zmod. *)
   (* Instance cancel_bits_to_bv_32 : Cancel eq (@bits_to_bv 32 32) (@ 32 32). *)
   (* Proof. *)
@@ -1264,7 +1264,7 @@ Proof.
   simplify_tupless.
   repeat constructor.
 Qed.
-Opaque fifo1.impl. 
+Opaque fifo1.full fifo1.empty fifo1.enq fifo1.first fifo1.deq.
 Import cpu.
 Import type.
 
