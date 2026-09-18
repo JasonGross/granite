@@ -1,6 +1,6 @@
 (dirs :standard _objects)
 
-(alias (name default) (deps (alias_rec core/all) (alias_rec app/all) (alias_rec isaSpec/all) (alias_rec quartz/lang/all) (alias_rec quartz/examples/all)))
+(alias (name default) (deps (alias_rec core/all) (alias_rec app/all) (alias_rec isaSpec/all) (alias_rec riscvConnection/all) (alias_rec quartz/lang/all) (alias_rec quartz/examples/all)))
 
 (env
   (dev

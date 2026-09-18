@@ -25,6 +25,15 @@ opam install . --deps-only                 # or install the versions above by ha
 dune build                                 # builds core, app, isaSpec, quartz, salsa20
 ```
 
+`riscvConnection/` (statements only, see mit-plv/granite#1) additionally needs
+[coqutil](https://github.com/mit-plv/coqutil) and [riscv-coq](https://github.com/mit-plv/riscv-coq)
+built from source (stdlib-bits versions, i.e. coqutil master and riscv-coq master), found through
+`COQPATH`:
+
+```sh
+COQPATH=/path/to/coqutil/src:/path/to/riscv-coq/src dune build
+```
+
 ## License
 
 See [LICENSE](LICENSE).

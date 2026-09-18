@@ -1,0 +1,6 @@
+(coq.theory
+ (package granite)
+ (name granite.riscvConnection)
+ (theories stdpp Ltac2 RecordUpdate Stdlib granite.core granite.app granite.isaSpec
+           quartz.lang quartz.examples coqutil riscv)
+)
