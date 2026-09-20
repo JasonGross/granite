@@ -281,7 +281,8 @@ Section Connection.
   Definition mem_related (imem dmem : baseMem.Mem) (xaddrs : list word) (m : Mem) : Prop :=
     (forall a, ~ isMMIOAddr_g a -> map.get m a = Some (to_byte (baseMem.load_byte (to_N a) dmem))) /\
     (forall a, isMMIOAddr_g a -> map.get m a = None) /\
-    (forall a, In a xaddrs -> baseMem.load_byte (to_N a) dmem = baseMem.load_byte (to_N a) imem).
+    (forall a, In a xaddrs -> baseMem.load_byte (to_N a) dmem = baseMem.load_byte (to_N a) imem) /\
+    (forall a, In a xaddrs -> ~ isMMIOAddr_g a).
 
   (* the abstracted granite log is the abstraction of riscv-coq's [getLog]
      (bedrock2's [mmio_trace_abstraction_relation], stated here abstractly) *)
@@ -290,8 +291,11 @@ Section Connection.
   (* OPEN ISSUE (leakage): granite's per-instruction leakage versus riscv-coq's
      [getTrace].  For all instructions but [mul], granite's event is a function
      of riscv-coq's ([LeakageOfInstr]); granite's [mul] additionally leaks
-     whether an operand is zero.  Stated abstractly until aligned. *)
-  Context (leak_related : IFC.L_leakage -> option (list LeakageOfInstr.LeakageEvent) -> Prop).
+     whether an operand is zero.  Stated abstractly until aligned:
+     [leak_related] between instructions, [leak_related_ahead] after granite's
+     [StepLeak] micro-step, when granite has emitted the event of the next
+     instruction and riscv-coq has not stepped yet. *)
+  Context (leak_related leak_related_ahead : IFC.L_leakage -> option (list LeakageOfInstr.LeakageEvent) -> Prop).
   (* the leakage granite has produced so far is not in [St] either.  Until the
      leakage alignment is done it is modelled as an abstract function of the
      architectural core of the state (phase, architectural state, MMIO
@@ -304,30 +308,51 @@ Section Connection.
                                 * semantics.ArchState * list specMemory.memReqEvent
                                 * list mem_resp_t * option mword -> IFC.L_leakage).
   Definition granite_leaks (g : GState) : IFC.L_leakage := granite_leaks_core (core_of (fst g)).
+  Local Arguments granite_leaks : simpl never.
 
-  (* in-flight states: granite between the micro-steps of one instruction
-     ([StepInstr], [StepWaitMMIOResp], [StepInterrupt] phases), related to the
-     riscv-coq state BEFORE the instruction; one constructor per phase in the
-     real development *)
+  (* the ISA parameters the theorems are about: granite's decoder, and an MMIO
+     predicate that agrees with the platform's *)
+  Hypothesis params_decode : forall w, instrs.params.decode w = instrs.Decode.decode w.
+  Hypothesis params_isMMIO : forall a, Zmod.unsigned (instrs.params.isMMIOAddr a) = 1%Z <-> isMMIOAddr_g a.
+  Hypothesis mmio_spec_agrees : forall a, mmio_spec.(isMMIOAddr) a <-> isMMIOAddr_g a.
+
+  (* what idle and post-leak states share: idle wires, empty MMIO buffers, no
+     interrupt latched, and the architectural components in relation *)
+  Record core_related (s : GSt) (l : list MMIOEvent) (m : MetricRiscvMachine) : Prop := {
+    cr_wires : s.(semantics.PubOutputWires) = IFC.default_PubOutput;
+    cr_req : s.(semantics.MMIOReqBuffer) = [];
+    cr_resp : s.(semantics.MMIORespBuffer) = [];
+    cr_int : s.(semantics.InterruptSt) = None;
+    cr_regs : regs_related s.(semantics.ArchSt).(semantics.Rf) m.(getRegs);
+    cr_pc : m.(getPc) = s.(semantics.ArchSt).(semantics.Pc);
+    cr_npc : m.(getNextPc) = Zmod.add s.(semantics.ArchSt).(semantics.Pc) (bits.of_Z 32 4);
+    cr_mem : mem_related s.(semantics.ArchSt).(semantics.Imem) s.(semantics.ArchSt).(semantics.Dmem)
+                         m.(getXAddrs) m.(getMem);
+    cr_log : log_related l m.(getLog);
+  }.
+
+  (* the MMIO wait phase, related to the riscv-coq state BEFORE the instruction;
+     its definition is part of the MMIO wait work *)
   Context (inflight_related : GState -> MetricRiscvMachine -> Prop).
 
   (* metrics are not related (as in bedrock2's Kami connection, [getMetrics] is unconstrained) *)
   Inductive related : GState -> MetricRiscvMachine -> Prop :=
   | related_idle : forall (g : GState) (m : MetricRiscvMachine),
       ((fst g).(semantics.Phase) = StepLeak \/ (fst g).(semantics.Phase) = StepInterrupt) ->
-      (fst g).(semantics.PubOutputWires) = IFC.default_PubOutput ->
-      (fst g).(semantics.MMIOReqBuffer) = [] ->
-      (fst g).(semantics.MMIORespBuffer) = [] ->
-      (fst g).(semantics.InterruptSt) = None ->
-      regs_related (fst g).(semantics.ArchSt).(semantics.Rf) m.(getRegs) ->
-      m.(getPc) = (fst g).(semantics.ArchSt).(semantics.Pc) ->
-      m.(getNextPc) = Zmod.add (fst g).(semantics.ArchSt).(semantics.Pc) (bits.of_Z 32 4) ->
-      mem_related (fst g).(semantics.ArchSt).(semantics.Imem)
-                  (fst g).(semantics.ArchSt).(semantics.Dmem) m.(getXAddrs) m.(getMem) ->
-      log_related (snd g) m.(getLog) ->
+      core_related (fst g) (snd g) m ->
       leak_related (granite_leaks g) m.(getTrace) ->
       related g m
-  | related_inflight : forall (g : GState) (m : MetricRiscvMachine), inflight_related g m -> related g m.
+  (* after granite's [StepLeak] micro-step: the next instruction is decoded
+     from the word at [Pc], riscv-coq has not stepped *)
+  | related_instr : forall (g : GState) (m : MetricRiscvMachine) inst,
+      (fst g).(semantics.Phase) = StepInstr inst ->
+      inst = instrs.Decode.decode (baseMem.LoadWord (fst g).(semantics.ArchSt).(semantics.Pc)
+                                                    (fst g).(semantics.ArchSt).(semantics.Imem)) ->
+      core_related (fst g) (snd g) m ->
+      leak_related_ahead (granite_leaks g) m.(getTrace) ->
+      related g m
+  | related_wait : forall (g : GState) (m : MetricRiscvMachine), inflight_related g m -> related g m.
+
 
   (** ** Assumptions standing in for the open issues of granite#1 *)
 
@@ -618,10 +643,9 @@ Section Connection.
 
   (** *** What the in-flight relation must satisfy (properties of the parameter) *)
 
-  (* an in-flight state is in [StepInstr] or [StepWaitMMIOResp] *)
+  (* the abstract in-flight relation covers the MMIO wait phase *)
   Hypothesis inflight_phase : forall g m, inflight_related g m ->
-      (exists inst, (fst g).(semantics.Phase) = StepInstr inst) \/
-      (exists req, (fst g).(semantics.Phase) = StepWaitMMIOResp req).
+      exists req, (fst g).(semantics.Phase) = StepWaitMMIOResp req.
   (* it ignores the default machine and the wires *)
   Hypothesis inflight_set_default : forall s l m nd,
       inflight_related (s, l) m -> inflight_related (s <| semantics.DefaultMachine := nd |>, l) m.
@@ -643,39 +667,112 @@ Section Connection.
   Proof.
     intros g m H. inversion H; subst.
     - destruct H0; auto.
-    - destruct (inflight_phase _ _ H0); auto.
+    - eauto.
+    - destruct (inflight_phase _ _ H0); eauto.
+  Qed.
+
+  (* the bookkeeping operations only touch the default machine and the wires *)
+  Lemma core_related_set_default : forall s l m nd,
+      core_related s l m -> core_related (s <| semantics.DefaultMachine := nd |>) l m.
+  Proof. intros s l m nd [ ]; constructor; unfold RecordSet.set; cbn; first [assumption | reflexivity]. Qed.
+
+  Lemma core_related_update_mmio : forall s l m dmd,
+      (forall req, s.(semantics.Phase) <> StepWaitMMIOResp req) ->
+      core_related s l m -> core_related (semantics.update_mmio s dmd) l m.
+  Proof.
+    intros s l m dmd Hph [ ]. unfold semantics.update_mmio, RecordSet.set.
+    destruct (semantics.Phase s) eqn:E; try (exfalso; eapply Hph; reflexivity);
+      constructor; cbn; first [assumption | reflexivity].
+  Qed.
+
+  Lemma core_related_prologue : forall s l m i,
+      core_related s l m -> admissible i ->
+      core_related (prologue s i) (cycle_mmio s i ++ l) m /\ cycle_mmio s i = [].
+  Proof.
+    intros s l m i [ ] [Hint Hlen].
+    unfold prologue, cycle_mmio, RecordSet.set, semantics.consumeMMIOResp, semantics.consumeMMIOReq.
+    rewrite cr_wires0, Hint. cbn. split; [| reflexivity].
+    constructor; cbn; first [assumption | reflexivity].
+  Qed.
+
+  Lemma granite_leaks_set_default : forall s l nd,
+      granite_leaks (s <| semantics.DefaultMachine := nd |>, l) = granite_leaks (s, l).
+  Proof. intros. unfold granite_leaks, core_of, RecordSet.set. cbn. reflexivity. Qed.
+  Lemma granite_leaks_update_mmio : forall s l dmd,
+      granite_leaks (semantics.update_mmio s dmd, l) = granite_leaks (s, l).
+  Proof.
+    intros. unfold granite_leaks, core_of, semantics.update_mmio, RecordSet.set. cbn [fst].
+    destruct (semantics.Phase s); try reflexivity.
+    destruct (semantics.MMIOReqBuffer s); [destruct (semantics.MMIORespBuffer s) |]; reflexivity.
+  Qed.
+  Lemma granite_leaks_prologue : forall s l l' i,
+      admissible i -> s.(semantics.InterruptSt) = None -> s.(semantics.PubOutputWires) = IFC.default_PubOutput ->
+      granite_leaks (prologue s i, l') = granite_leaks (s, l).
+  Proof.
+    intros s l l' i [Hint _] HI HW.
+    unfold granite_leaks, core_of, prologue, RecordSet.set, semantics.consumeMMIOResp, semantics.consumeMMIOReq.
+    rewrite HW, Hint, HI. reflexivity.
   Qed.
 
   Lemma related_set_default : forall s l m nd,
       related (s, l) m -> related (s <| semantics.DefaultMachine := nd |>, l) m.
   Proof.
-    intros s l m nd H. inversion H; subst.
-    - apply related_idle; unfold RecordSet.set, granite_leaks, core_of in *; cbn in *; assumption.
-    - apply related_inflight. apply inflight_set_default. assumption.
+    intros s l m nd H. inversion H; subst; cbn in *.
+    - eapply related_idle; cbn; eauto using core_related_set_default;
+        rewrite granite_leaks_set_default; assumption.
+    - eapply related_instr; cbn; eauto using core_related_set_default;
+        rewrite granite_leaks_set_default; assumption.
+    - apply related_wait. apply inflight_set_default. assumption.
   Qed.
 
   Lemma related_update_mmio : forall s l m dmd,
       related (s, l) m -> related (semantics.update_mmio s dmd, l) m.
   Proof.
-    intros s l m dmd H. inversion H; subst.
-    - unfold semantics.update_mmio, RecordSet.set, granite_leaks, core_of in *. cbn in *.
-      destruct H0 as [H0 | H0]; rewrite H0 in *; cbn; apply related_idle;
-        unfold granite_leaks, core_of in *; cbn in *; auto.
-    - apply related_inflight. apply inflight_update_mmio. assumption.
+    intros s l m dmd H. inversion H; subst; cbn in *.
+    - eapply related_idle; cbn.
+      + unfold semantics.update_mmio, RecordSet.set. destruct H0 as [H0 | H0]; rewrite H0; cbn; auto.
+      + apply core_related_update_mmio; [| assumption]. intros req E. destruct H0; congruence.
+      + rewrite granite_leaks_update_mmio. assumption.
+    - match goal with HP : semantics.Phase s = StepInstr _ |- _ =>
+      eapply related_instr; cbn;
+        [ unfold semantics.update_mmio, RecordSet.set; rewrite HP; reflexivity
+        | unfold semantics.update_mmio, RecordSet.set; rewrite HP; reflexivity
+        | apply core_related_update_mmio; [intros req E; congruence | assumption]
+        | rewrite granite_leaks_update_mmio; assumption ]
+      end.
+    - apply related_wait. apply inflight_update_mmio. assumption.
   Qed.
 
-  (* in idle phases the wires are idle, so the handshake consumes nothing and
-     logs nothing; the interrupt latch stays [None] for admissible inputs *)
+  Lemma prologue_phase : forall s i, (prologue s i).(semantics.Phase) = s.(semantics.Phase).
+  Proof.
+    intros. unfold prologue, RecordSet.set, semantics.consumeMMIOResp, semantics.consumeMMIOReq. cbn.
+    repeat (destruct (_ && _)); reflexivity.
+  Qed.
+  Lemma prologue_arch : forall s i, (prologue s i).(semantics.ArchSt) = s.(semantics.ArchSt).
+  Proof.
+    intros. unfold prologue, RecordSet.set, semantics.consumeMMIOResp, semantics.consumeMMIOReq. cbn.
+    repeat (destruct (_ && _)); reflexivity.
+  Qed.
+
+  (* in idle and post-leak states the wires are idle, so the handshake consumes
+     nothing and logs nothing; the interrupt latch stays [None] for admissible inputs *)
   Lemma related_prologue : forall s l m i,
       related (s, l) m -> admissible i -> related (prologue s i, cycle_mmio s i ++ l) m.
   Proof.
-    intros s l m i H [Hint Hlen]. inversion H; subst.
-    - unfold prologue, cycle_mmio, RecordSet.set, semantics.consumeMMIOResp, semantics.consumeMMIOReq,
-        granite_leaks, core_of in *. cbn in *.
-      rewrite H1, Hint in *. cbn.
-      match goal with HI : semantics.InterruptSt s = None |- _ => rewrite HI in * end.
-      apply related_idle; unfold granite_leaks, core_of in *; cbn in *; auto.
-    - apply related_inflight. apply inflight_prologue; [assumption | split; assumption].
+    intros s l m i H Hi. inversion H; subst; cbn in *.
+    - match goal with Hc : core_related s l m |- _ =>
+      destruct (core_related_prologue _ _ _ _ Hc Hi) as [Hc' He];
+      eapply related_idle; cbn;
+        [ rewrite prologue_phase; assumption | exact Hc'
+        | rewrite (granite_leaks_prologue _ l) by (try assumption; apply Hc); assumption ]
+      end.
+    - match goal with Hc : core_related s l m, HP : semantics.Phase s = StepInstr _ |- _ =>
+      destruct (core_related_prologue _ _ _ _ Hc Hi) as [Hc' He];
+      eapply related_instr; cbn;
+        [ rewrite prologue_phase; exact HP | rewrite prologue_arch; reflexivity | exact Hc'
+        | rewrite (granite_leaks_prologue _ l) by (try assumption; apply Hc); assumption ]
+      end.
+    - apply related_wait. apply inflight_prologue; assumption.
   Qed.
 
   (** *** The micro-steps *)
