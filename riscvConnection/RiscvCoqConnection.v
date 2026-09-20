@@ -34,7 +34,7 @@
 
 From Stdlib Require Import ZArith Lists.List Strings.String Wf_nat Lia Btauto.
 Import ListNotations.
-From coqutil Require Import Map.Interface Word.Bitwidth Byte Z.BitOps Z.bitblast Map.Memory Word.LittleEndianList Datatypes.List.
+From coqutil Require Import Map.Interface Map.Properties Map.OfListWord Word.Bitwidth Byte Z.BitOps Z.bitblast Map.Memory Word.LittleEndianList Datatypes.List.
 From coqutil Require Semantics.OmniSmallstepCombinators.
 From riscv Require Import Utility.Utility Utility.Monads Spec.Decode
   Spec.Primitives Spec.LeakageOfInstr Platform.RiscvMachine
@@ -43,7 +43,7 @@ From riscv Require Import Utility.Utility Utility.Monads Spec.Decode
   Platform.MetricLogging Platform.MaterializeRiscvProgram
   Platform.MetricMaterializeRiscvProgram Platform.MinimalMMIO Platform.MetricMinimalMMIO.
 From riscv Require Spec.Machine.
-From stdpp Require Import list_numbers finite vector.
+From stdpp Require Import list_numbers finite vector fin_maps.
 From RecordUpdate Require Import RecordSet. Import RecordSetNotations.
 From granite.core Require Import Bits.
 From granite.isaSpec Require Import Common IFC Memory RegisterFile Riscv Spec.
@@ -156,7 +156,8 @@ Section Connection.
   (* riscv-coq side.  Granite is 32-bit ([Common.WIDTH]). *)
   Local Notation word := (bits 32).
   (* riscv-coq registers are indexed by [Z] (its [Register]); granite's [Register] is [bits 5] *)
-  Context {Registers : map.map Z word} {Registers_ok : map.ok Registers} {Mem : map.map word byte}.
+  Context {Registers : map.map Z word} {Registers_ok : map.ok Registers}
+          {Mem : map.map word byte} {Mem_ok : map.ok Mem}.
   Local Notation MetricRiscvMachine := (@MetricRiscvMachine 32 Words32Naive Registers Mem).
 
   (* The platform is the concrete [MetricMinimalMMIO] one (bedrock2's compiler
@@ -170,7 +171,8 @@ Section Connection.
   Local Notation RVM := (@MetricMaterializeWithLeakage 32 Words32Naive).
   Local Notation RVP := (@Spec.Machine.RVP _ _ M word _ _ RVM).
   (* [translate] etc.: the default identity translation (no alignment traps) *)
-  Context {RVS : @Spec.Machine.RiscvMachine M word _ _ RVP}.
+  Local Definition RVS : @Spec.Machine.RiscvMachine M word _ _ RVP :=
+    @Spec.Machine.DefaultRiscvState M _ word _ RVP.
   Local Notation PP := (@MetricMinimalMMIOPrimitivesParams 32 Words32Naive Mem Registers mmio_spec).
 
   Definition iset : InstructionSet := RV32IM.
@@ -1313,8 +1315,304 @@ Section Connection.
         destruct (inflight_phase _ _ Hi) as [req Hw]; cbn in Hw; rewrite Hph in Hw; discriminate end.
   Qed.
 
-  (* memory: a non-MMIO access retires; an MMIO access issues its request and
-     waits, with the request in the buffer *)
+  (** *** Memory accesses: the aligned non-MMIO case *)
+
+  (* granite's MMIO test, false *)
+  Lemma mmio_test_false : forall a : word,
+      domain.Zmod.nonzero (instrs.params.isMMIOAddr a) = false -> ~ isMMIOAddr_g a.
+  Proof.
+    intros a H Hm. apply params_isMMIO in Hm. unfold domain.Zmod.nonzero in H.
+    apply Bool.negb_false_iff in H. apply Zmod.eqb_eq in H. rewrite H, Zmod.unsigned_0 in Hm. discriminate.
+  Qed.
+
+  Lemma aligned_mod4 : forall a : word,
+      semantics.is_word_aligned 4 a = true -> (Zmod.unsigned a mod 4 = 0)%Z.
+  Proof.
+    intros a H. unfold semantics.is_word_aligned in H. apply bool_decide_eq_true in H.
+    apply (f_equal Zmod.unsigned) in H.
+    assert (H3 : Zmod.unsigned (Zmod.sub (of_N 32 4) (1%Zmod : mword)) = 3%Z) by (vm_compute; reflexivity).
+    rewrite Zmod.unsigned_and, H3 in H.
+    change 3%Z with (Z.ones 2) in H. rewrite Z.land_ones in H by lia. change (2 ^ 2)%Z with 4%Z in H.
+    rewrite (Z.mod_small (Zmod.unsigned a mod 4) (2 ^ 32)) in H;
+      [| pose proof (Z.mod_pos_bound (Zmod.unsigned a) 4 ltac:(lia)); pow32; lia].
+    rewrite H. vm_compute. reflexivity.
+  Qed.
+
+  (* an aligned word fits before the end of the address space *)
+  Lemma aligned_no_wrap : forall a : word,
+      (Zmod.unsigned a mod 4 = 0)%Z -> (Zmod.unsigned a + 4 <= 2 ^ 32)%Z.
+  Proof.
+    intros a H. pose proof (bits.unsigned_range a ltac:(lia)). pow32.
+    pose proof (Z.div_mod (Zmod.unsigned a) 4 ltac:(lia)). lia.
+  Qed.
+
+  (* granite's byte-wise store *)
+  Lemma load_byte_store_bytes_out : forall (bs : list Common.Byte) (n i : N) (mem : baseMem.Mem),
+      ~ (n <= i < n + N.of_nat (length bs))%N ->
+      baseMem.load_byte i (baseMem.store_bytes n bs mem) = baseMem.load_byte i mem.
+  Proof.
+    induction bs as [| b bs IH]; intros n i mem Hout; cbn [baseMem.store_bytes].
+    - reflexivity.
+    - rewrite IH by (cbn [length] in Hout; lia).
+      unfold baseMem.load_byte, baseMem.store_byte. rewrite lookup_total_insert_ne; [reflexivity |].
+      cbn [length] in Hout. lia.
+  Qed.
+
+  Lemma load_byte_store_bytes_in : forall (bs : list Common.Byte) (n i : N) (mem : baseMem.Mem),
+      (n <= i < n + N.of_nat (length bs))%N ->
+      baseMem.load_byte i (baseMem.store_bytes n bs mem) = List.nth (N.to_nat (i - n)) bs zeroes.
+  Proof.
+    induction bs as [| b bs IH]; intros n i mem Hin; cbn [length] in Hin.
+    - lia.
+    - cbn [baseMem.store_bytes].
+      destruct (N.eq_dec i n) as [E | NE].
+      + subst i. rewrite load_byte_store_bytes_out by lia.
+        unfold baseMem.load_byte, baseMem.store_byte. rewrite lookup_total_insert_eq.
+        replace (N.to_nat (n - n)) with 0%nat by lia. reflexivity.
+      + rewrite IH by lia.
+        replace (N.to_nat (i - n)) with (S (N.to_nat (i - (n + 1)))) by lia. reflexivity.
+  Qed.
+
+  (* granite's little-endian bytes of a word are coqutil's *)
+  Lemma to_byte_le : forall (v : Z) (i : nat), (i < 4)%nat ->
+      to_byte (List.nth i (bits_to_little_endian 4 8 v) zeroes) = byte.of_Z (Z.shiftr v (8 * Z.of_nat i)).
+  Proof.
+    intros v i Hi.
+    assert (HL : Z_to_little_endian 4 8 v !! i = Some (Z.land (Z.shiftr v (Z.of_nat i * 8)) (Z.ones 8))).
+    { apply Z_to_little_endian_lookup_Some; [lia | lia |]. split; [lia | reflexivity]. }
+    rewrite list_lookup_nth_error in HL.
+    assert (HN : List.nth i (bits_to_little_endian 4 8 v) zeroes =
+                 Zmod.of_Z (2 ^ 8) (Z.land (Z.shiftr v (Z.of_nat i * 8)) (Z.ones 8))).
+    { unfold bits_to_little_endian. apply List.nth_error_nth. apply List.map_nth_error. exact HL. }
+    rewrite HN.
+    apply byte.unsigned_inj. rewrite to_byte_unsigned, Zmod.unsigned_of_Z, !byte.unsigned_of_Z.
+    unfold byte.wrap. rewrite Z.land_ones by lia. rewrite Z.mod_mod by lia.
+    rewrite Z.mul_comm. reflexivity.
+  Qed.
+
+  (* riscv-coq's executable-address invalidation on a store *)
+  Lemma In_invalidate4 : forall (a x : word) xs,
+      In x (invalidateWrittenXAddrs 4 a xs) ->
+      In x xs /\ forall k, (0 <= k <= 3)%Z -> x <> Zmod.add a (bits.of_Z 32 k).
+  Proof.
+    intros a x xs H. cbn [invalidateWrittenXAddrs] in H. unfold removeXAddr in H.
+    rewrite !filter_In in H.
+    destruct H as [[[[Hin H3] H2] H1] H0].
+    apply Bool.negb_true_iff in H0, H1, H2, H3.
+    split; [exact Hin |].
+    intros k Hk E. subst x.
+    assert (Hk4 : (k = 0 \/ k = 1 \/ k = 2 \/ k = 3)%Z) by lia.
+    destruct Hk4 as [-> | [-> | [-> | ->]]].
+    - apply Bool.not_true_iff_false in H0. apply H0. apply Zmod.eqb_eq.
+      apply Zmod.unsigned_inj. rewrite Zmod.unsigned_add, bits.unsigned_of_Z_small by (pow32; lia).
+      rewrite Z.add_0_r. symmetry. apply Z.mod_small. pose proof (bits.unsigned_range a ltac:(lia)). pow32. lia.
+    - apply Bool.not_true_iff_false in H1. apply H1. apply Zmod.eqb_eq.
+      f_equal; apply Zmod.unsigned_inj; vm_compute; reflexivity.
+    - apply Bool.not_true_iff_false in H2. apply H2. apply Zmod.eqb_eq.
+      rewrite <- Zmod.add_assoc. f_equal; apply Zmod.unsigned_inj; vm_compute; reflexivity.
+    - apply Bool.not_true_iff_false in H3. apply H3. apply Zmod.eqb_eq.
+      rewrite <- !Zmod.add_assoc. f_equal; apply Zmod.unsigned_inj; vm_compute; reflexivity.
+  Qed.
+
+  (* address arithmetic inside an aligned word: the riscv-coq offset
+     [unsigned (x - a)] and granite's [N] offset agree *)
+  Lemma unsigned_sub_cases : forall a x : word,
+      (Zmod.unsigned x >= Zmod.unsigned a -> Zmod.unsigned (Zmod.sub x a) = Zmod.unsigned x - Zmod.unsigned a)%Z /\
+      (Zmod.unsigned x < Zmod.unsigned a -> Zmod.unsigned (Zmod.sub x a) = Zmod.unsigned x - Zmod.unsigned a + 2 ^ 32)%Z.
+  Proof.
+    intros a x. pose proof (bits.unsigned_range x ltac:(lia)). pose proof (bits.unsigned_range a ltac:(lia)).
+    rewrite bits.unsigned_sub. pow32. split; intro.
+    - apply Z.mod_small. lia.
+    - rewrite <- (Z.mod_add _ 1 _) by lia. rewrite Z.mod_small by lia. lia.
+  Qed.
+
+  Lemma footprint_index : forall a x : word,
+      (Zmod.unsigned a + 4 <= 2 ^ 32)%Z -> (Zmod.unsigned (Zmod.sub x a) < 4)%Z ->
+      Zmod.unsigned x = (Zmod.unsigned a + Zmod.unsigned (Zmod.sub x a))%Z.
+  Proof.
+    intros a x Hnw Hd. destruct (unsigned_sub_cases a x) as [H1 H2].
+    pose proof (bits.unsigned_range x ltac:(lia)). pose proof (bits.unsigned_range a ltac:(lia)).
+    destruct (Z_ge_lt_dec (Zmod.unsigned x) (Zmod.unsigned a)) as [Hge | Hlt].
+    - rewrite H1 in Hd |- * by exact Hge; pow32; lia.
+    - rewrite H2 in Hd |- * by exact Hlt; pow32; lia.
+  Qed.
+
+  Lemma footprint_index' : forall (a x : word) (k : Z),
+      (Zmod.unsigned a + 4 <= 2 ^ 32)%Z -> (0 <= k < 4)%Z -> Zmod.unsigned x = (Zmod.unsigned a + k)%Z ->
+      Zmod.unsigned (Zmod.sub x a) = k.
+  Proof.
+    intros a x k Hnw Hk Hx. destruct (unsigned_sub_cases a x) as [H1 H2]. rewrite H1 by lia. lia.
+  Qed.
+
+  Lemma word_of_index : forall (a x : word) (k : Z),
+      (Zmod.unsigned a + 4 <= 2 ^ 32)%Z -> (0 <= k < 4)%Z -> Zmod.unsigned x = (Zmod.unsigned a + k)%Z ->
+      x = Zmod.add a (bits.of_Z 32 k).
+  Proof.
+    intros a x k Hnw Hk Hx. pose proof (bits.unsigned_range a ltac:(lia)). apply Zmod.unsigned_inj.
+    rewrite Zmod.unsigned_add, bits.unsigned_of_Z_small by (pow32; lia). rewrite Z.mod_small by (pow32; lia). exact Hx.
+  Qed.
+
+  (* the four bytes riscv-coq finds at a non-MMIO word are granite's *)
+  Lemma load_bytes_related : forall imem dmem xaddrs mem (a : word) bs,
+      mem_related imem dmem xaddrs mem ->
+      (Zmod.unsigned a + 4 <= 2 ^ 32)%Z ->
+      coqutil.Map.Memory.load_bytes mem a 4 = Some bs ->
+      bs = List.map to_byte (baseMem.load_bytes (to_N a) 4 dmem).
+  Proof.
+    intros imem dmem xaddrs mem a bs [Hm1 [Hm2 [Hm3 [Hm4 Hm5]]]] Hnw HL.
+    pose proof (length_load_bytes _ _ _ _ HL) as Hlen.
+    assert (G : forall i, (i < 4)%nat ->
+              List.nth_error bs i = Some (to_byte (baseMem.load_byte (to_N a + Z.to_N (Z.of_nat i)) dmem))).
+    { intros i Hi. rewrite (nth_error_load_bytes _ _ _ _ HL i Hi).
+      destruct (map.get mem (Zmod.add a (bits.of_Z 32 (Z.of_nat i)))) eqn:E.
+      - assert (Hnm : ~ isMMIOAddr_g (Zmod.add a (bits.of_Z 32 (Z.of_nat i)))).
+        { intro Hm. rewrite Hm2 in E by exact Hm. discriminate. }
+        rewrite Hm1 in E by exact Hnm. rewrite to_N_add_small in E by lia. symmetry. exact E.
+      - exfalso. pose proof (proj2 (List.nth_error_Some bs i) ltac:(lia)) as Hs.
+        rewrite (nth_error_load_bytes _ _ _ _ HL i Hi) in Hs. exact (Hs E). }
+    apply nth_error_ext_samelength; [cbn; exact Hlen |].
+    intros i Hi. rewrite Hlen in Hi. rewrite G by exact Hi.
+    cbn [baseMem.load_bytes List.map]. unfold baseMem.load_byte.
+    destruct i as [| [| [| [| i]]]]; [| | | | lia]; cbn [List.nth_error Z.to_N Z.of_nat Pos.of_succ_nat].
+    - replace (to_N a + 0)%N with (to_N a) by lia. reflexivity.
+    - reflexivity.
+    - replace (to_N a + 1 + 1)%N with (to_N a + 2)%N by lia. reflexivity.
+    - replace (to_N a + 1 + 1 + 1)%N with (to_N a + 3)%N by lia. reflexivity.
+  Qed.
+
+  Lemma load_word_related : forall imem dmem xaddrs mem (a : word) bs,
+      mem_related imem dmem xaddrs mem ->
+      (Zmod.unsigned a + 4 <= 2 ^ 32)%Z ->
+      coqutil.Map.Memory.load_bytes mem a 4 = Some bs ->
+      bits.of_Z 32 (LittleEndianList.le_combine bs) = baseMem.LoadWord a dmem.
+  Proof.
+    intros. rewrite (load_bytes_related _ _ _ _ _ _ H H0 H1). unfold baseMem.LoadWord.
+    rewrite le_combine_granite. reflexivity.
+  Qed.
+
+  (* an aligned non-MMIO store: riscv-coq's byte map and executable-address
+     set against granite's [StoreWord] *)
+  Lemma mem_related_store : forall imem dmem xaddrs mem (a v : word) bs,
+      mem_related imem dmem xaddrs mem ->
+      (Zmod.unsigned a + 4 <= 2 ^ 32)%Z ->
+      coqutil.Map.Memory.load_bytes mem a 4 = Some bs ->
+      mem_related imem (baseMem.StoreWord a v dmem) (invalidateWrittenXAddrs 4 a xaddrs)
+                  (coqutil.Map.Memory.unchecked_store_bytes mem a (LittleEndianList.le_split 4 (Zmod.unsigned v))).
+  Proof.
+    intros imem dmem xaddrs mem a v bs Hrel Hnw HL.
+    pose proof Hrel as [Hm1 [Hm2 [Hm3 [Hm4 Hm5]]]].
+    pose proof (bits.unsigned_range a ltac:(lia)) as Har.
+    pose proof (length_load_bytes _ _ _ _ HL) as Hlen.
+    set (gbs := bits_to_little_endian 4 8 (Zmod.unsigned v)).
+    assert (Hglen : length gbs = 4%nat) by (apply length_bits_to_little_endian; lia).
+    (* riscv-coq's new bytes, by footprint offset *)
+    assert (Hfoot : forall x : word,
+        map.get (coqutil.Map.Memory.unchecked_store_bytes mem a (LittleEndianList.le_split 4 (Zmod.unsigned v))) x =
+        match List.nth_error (LittleEndianList.le_split 4 (Zmod.unsigned v)) (Z.to_nat (Zmod.unsigned (Zmod.sub x a))) with
+        | Some b => Some b
+        | None => map.get mem x
+        end).
+    { intros x. unfold coqutil.Map.Memory.unchecked_store_bytes. rewrite map.get_putmany_dec.
+      rewrite (map.get_of_list_word_at (width := 32) ltac:(lia)). reflexivity. }
+    (* granite's new bytes, by N offset *)
+    assert (Hg_in : forall x : word, (Zmod.unsigned (Zmod.sub x a) < 4)%Z ->
+        baseMem.load_byte (to_N x) (baseMem.StoreWord a v dmem) =
+        List.nth (Z.to_nat (Zmod.unsigned (Zmod.sub x a))) gbs zeroes).
+    { intros x Hd. pose proof (footprint_index a x Hnw Hd) as Hx.
+      pose proof (Zmod.unsigned_pos_bound (Zmod.sub x a) ltac:(pow32; lia)) as Hd0.
+      set (d := Zmod.unsigned (Zmod.sub x a)) in *. clearbody d.
+      assert (Hd4 : (Z.to_N d < 4)%N) by (apply (Z2N.inj_lt d 4); lia).
+      unfold baseMem.StoreWord. fold gbs. rewrite load_byte_store_bytes_in.
+      - f_equal. unfold to_N. rewrite Hx, Z2N.inj_add by lia. rewrite N.add_comm, N.add_sub. apply Z_N_nat.
+      - rewrite Hglen. unfold to_N. rewrite Hx, Z2N.inj_add by lia. change (N.of_nat 4) with 4%N.
+        split; [apply N.le_add_r | apply N.add_lt_mono_l; exact Hd4]. }
+    assert (Hg_out : forall x : word, ~ (Zmod.unsigned (Zmod.sub x a) < 4)%Z ->
+        baseMem.load_byte (to_N x) (baseMem.StoreWord a v dmem) = baseMem.load_byte (to_N x) dmem).
+    { intros x Hd. unfold baseMem.StoreWord. fold gbs. apply load_byte_store_bytes_out.
+      rewrite Hglen. intros [Hlo Hhi]. apply Hd.
+      pose proof (bits.unsigned_range x ltac:(lia)) as Hxr.
+      unfold to_N in Hlo, Hhi.
+      pose proof (proj1 (N2Z.inj_le _ _) Hlo) as Hlo'. pose proof (proj1 (N2Z.inj_lt _ _) Hhi) as Hhi'.
+      rewrite N2Z.inj_add in Hhi'.
+      rewrite (Z2N.id (Zmod.unsigned x)) in Hlo', Hhi' by lia.
+      rewrite (Z2N.id (Zmod.unsigned a)) in Hlo', Hhi' by lia.
+      change (Z.of_N (N.of_nat 4)) with 4%Z in Hhi'.
+      rewrite (footprint_index' a x (Zmod.unsigned x - Zmod.unsigned a) Hnw ltac:(lia) ltac:(lia)). lia. }
+    assert (Hd0 : forall x : word, (0 <= Zmod.unsigned (Zmod.sub x a))%Z)
+      by (intros; apply Zmod.unsigned_pos_bound; pow32; lia).
+    split; [| split; [| split; [| split]]].
+    - (* non-MMIO bytes *)
+      intros x Hnm. rewrite Hfoot.
+      destruct (Z_lt_dec (Zmod.unsigned (Zmod.sub x a)) 4) as [Hin | Hout].
+      + rewrite nth_error_le_split by (pose proof (Hd0 x); lia).
+        rewrite Hg_in by exact Hin. rewrite to_byte_le by (pose proof (Hd0 x); lia).
+        first [reflexivity | do 3 f_equal; pose proof (Hd0 x); lia].
+      + rewrite (proj2 (List.nth_error_None _ _)) by (rewrite length_le_split; pose proof (Hd0 x); lia).
+        rewrite Hg_out by exact Hout. apply Hm1. exact Hnm.
+    - (* MMIO bytes stay absent *)
+      intros x Hm. rewrite Hfoot.
+      destruct (Z_lt_dec (Zmod.unsigned (Zmod.sub x a)) 4) as [Hin | Hout].
+      + exfalso. pose proof (footprint_index a x Hnw Hin) as Hx. pose proof (Hd0 x).
+        pose proof (word_of_index a x (Zmod.unsigned (Zmod.sub x a)) Hnw ltac:(lia) Hx) as Hxw.
+        pose proof (nth_error_load_bytes _ _ _ _ HL (Z.to_nat (Zmod.unsigned (Zmod.sub x a))) ltac:(lia)) as Hb.
+        rewrite Z2Nat.id in Hb by lia. rewrite <- Hxw in Hb.
+        rewrite Hm2 in Hb by exact Hm.
+        pose proof (proj2 (List.nth_error_Some bs (Z.to_nat (Zmod.unsigned (Zmod.sub x a)))) ltac:(lia)).
+        congruence.
+      + rewrite (proj2 (List.nth_error_None _ _)) by (rewrite length_le_split; pose proof (Hd0 x); lia).
+        apply Hm2. exact Hm.
+    - (* executable addresses still agree with Imem *)
+      intros x Hx. apply In_invalidate4 in Hx. destruct Hx as [Hx Hne].
+      rewrite Hg_out; [apply Hm3; exact Hx |].
+      intro Hin. pose proof (footprint_index a x Hnw Hin) as Hxu. pose proof (Hd0 x).
+      apply (Hne (Zmod.unsigned (Zmod.sub x a)) ltac:(lia)).
+      apply (word_of_index a x (Zmod.unsigned (Zmod.sub x a)) Hnw ltac:(lia) Hxu).
+    - intros x Hx. apply In_invalidate4 in Hx. apply Hm4. tauto.
+    - intros x Hx. apply In_invalidate4 in Hx. apply Hm5. tauto.
+  Qed.
+
+  (* the data address of a memory instruction *)
+  Definition mem_addr (rf : registerFile.RegFile) (mi : instrs.MemInstr) : word :=
+    match mi with
+    | instrs.Lw _ rs1 off | instrs.Sw rs1 _ off =>
+        Zmod.add (registerFile.readReg rs1 rf) (bits.of_Z 32 (Zmod.signed off))
+    end.
+
+  (* misaligned: granite traps, riscv-coq's default [translate] does not
+     (excluded by [no_misaligned_access] once [data_access_aligned] is made concrete) *)
+  Lemma retire_mem_misaligned : forall s l m Q x dmd mi,
+      related (s, l) m -> run1_step m Q -> s.(semantics.Phase) = StepInstr (instrs.Mem mi) ->
+      semantics.is_word_aligned 4 (mem_addr s.(semantics.ArchSt).(semantics.Rf) mi) = false ->
+      retired (mstep dmd s x) l Q.
+  Proof. (* ADMIT: misaligned access (no_misaligned_access) *) Admitted.
+
+  (* MMIO: granite issues the request and waits *)
+  Lemma retire_mem_mmio : forall s l m Q x dmd mi,
+      related (s, l) m -> run1_step m Q -> s.(semantics.Phase) = StepInstr (instrs.Mem mi) ->
+      semantics.is_word_aligned 4 (mem_addr s.(semantics.ArchSt).(semantics.Rf) mi) = true ->
+      domain.Zmod.nonzero (instrs.params.isMMIOAddr (mem_addr s.(semantics.ArchSt).(semantics.Rf) mi)) = true ->
+      related (mstep dmd s x, l) m /\
+      exists req, (mstep dmd s x).(semantics.Phase) = StepWaitMMIOResp req /\
+                  (mstep dmd s x).(semantics.MMIOReqBuffer) <> [].
+  Proof. (* ADMIT: MMIO wait phases *) Admitted.
+
+  Local Ltac mem_reduce H :=
+    ctrl_reduce H;
+    cbn [Spec.Machine.translate RVS Spec.Machine.DefaultRiscvState Spec.Machine.loadWord Spec.Machine.storeWord
+         Bind Return free.Monad_free free.bind free.interp_fix free.interp_body interp_action interpret_action
+         MetricMaterializeWithLeakage MetricMaterialize fst snd id Spec.Machine.RVP
+         getMachine getMetrics Spec.Machine.setRegister Spec.Machine.endCycleNormal Spec.Machine.getRegister
+         MetricRiscvMachine.withRegs MetricRiscvMachine.withPc MetricRiscvMachine.withNextPc
+         RiscvMachine.withRegs RiscvMachine.withPc RiscvMachine.withNextPc updatePc
+         RiscvMachine.getRegs RiscvMachine.getPc RiscvMachine.getNextPc RiscvMachine.getMem
+         RiscvMachine.getXAddrs RiscvMachine.getLog RiscvMachine.getTrace int32ToReg regToInt32 MachineWidth_XLEN] in H;
+    unfold store, Memory.store_bytes, coqutil.Map.Memory.store_Z, coqutil.Map.Memory.store_bytes,
+      coqutil.Map.Memory.load_Z in H;
+    cbn [RiscvMachine.getRegs RiscvMachine.getPc RiscvMachine.getNextPc RiscvMachine.getMem
+         RiscvMachine.getXAddrs RiscvMachine.getLog RiscvMachine.getTrace] in H;
+    rewrite ?length_le_split in H;
+    change (8 * Z.of_nat 4)%Z with 32%Z in H.
+
   Lemma retire_mem : forall s l m Q x dmd inst,
       related (s, l) m -> run1_step m Q -> s.(semantics.Phase) = StepInstr inst ->
       (match inst with instrs.Mem _ => True | _ => False end) ->
@@ -1322,7 +1620,98 @@ Section Connection.
       (related (mstep dmd s x, l) m /\
        exists req, (mstep dmd s x).(semantics.Phase) = StepWaitMMIOResp req /\
                    (mstep dmd s x).(semantics.MMIOReqBuffer) <> []).
-  Proof. (* ADMIT: misaligned access (no_misaligned_access) and MMIO wait phases *) Admitted.
+  Proof.
+    intros s l m Q x dmd inst HR HQ Hph Hcls.
+    pose proof HR as HR0.
+    destruct inst as [si | ci | mi | w']; try (exfalso; exact Hcls).
+    (* the misaligned and MMIO cases are delegated *)
+    destruct (semantics.is_word_aligned 4 (mem_addr s.(semantics.ArchSt).(semantics.Rf) mi)) eqn:Hal;
+      [| left; exact (retire_mem_misaligned s l m Q x dmd mi HR HQ Hph Hal)].
+    destruct (domain.Zmod.nonzero (instrs.params.isMMIOAddr (mem_addr s.(semantics.ArchSt).(semantics.Rf) mi))) eqn:Hmmio;
+      [right; exact (retire_mem_mmio s l m Q x dmd mi HR HQ Hph Hal Hmmio) |].
+    left.
+    pose proof (mmio_test_false _ Hmmio) as Hnm.
+    pose proof (aligned_no_wrap _ (aligned_mod4 _ Hal)) as Hnw.
+    inversion HR; subst; cbn in *.
+    - match goal with Hd : _ \/ _ |- _ => destruct Hd as [Hd | Hd]; congruence end.
+    - match goal with HP : semantics.Phase s = StepInstr ?i |- _ =>
+        lazymatch i with instrs.Mem mi => fail | _ => rewrite Hph in HP; inversion HP; subst end end.
+      match goal with Hc : core_related s l m |- _ => rename Hc into Hcore end.
+      destruct m as [[regs pc npc mem xaddrs log trace] metrics].
+      reduce_run1 HQ.
+      destruct HQ as [HX HQ]; specialize (HX eq_refl).
+      pose proof (fetch_related s l _ Hcore HX) as HF; cbn [getMachine getMem getPc] in HF.
+      unfold Memory.loadWord in HF; rewrite HF in HQ.
+      set (w := baseMem.LoadWord (semantics.Pc (semantics.ArchSt s)) (semantics.Imem (semantics.ArchSt s))) in *.
+      assert (Egi : instrs.Decode.decode w = instrs.Mem mi)
+        by (match goal with E : instrs.Mem mi = instrs.Decode.decode w |- _ => symmetry; exact E
+                          | E : instrs.Decode.decode w = instrs.Mem mi |- _ => exact E end).
+      assert (Hdec : granite_decodes w) by (unfold granite_decodes; rewrite Egi; exact I).
+      pose proof (decode_agree w Hdec) as HD. rewrite Egi in HD.
+      pose proof (leak_retire s l _ _ HR0 Hph I) as HL.
+      reduce_run1 HL; destruct HL as [_ HL]; unfold Memory.loadWord in HL; rewrite HF in HL.
+      destruct mi as [rd rs1 offset | rs1 rs2 offset];
+      cbn [to_riscv] in HD; rewrite <- HD in HQ, HL; mem_reduce HQ; mem_reduce HL;
+      pose proof Hcore as Hc0;
+      destruct Hc0 as [Hw Hreq Hresp Hint Hregs Hpc Hnpc Hmem Hlog];
+      cbn [getMachine getRegs getPc getNextPc getMem getXAddrs getLog getTrace
+           RiscvMachine.getRegs RiscvMachine.getPc RiscvMachine.getNextPc RiscvMachine.getMem
+           RiscvMachine.getXAddrs RiscvMachine.getLog RiscvMachine.getTrace] in Hregs, Hpc, Hnpc, Hmem, Hlog;
+      rewrite !(regs_related_get _ _ _ Hregs) in HQ, HL;
+      unfold signExtend in HQ, HL; rewrite ?bits.smod_unsigned in HQ, HL;
+      cbn [mem_addr] in Hal, Hmmio, Hnm, Hnw;
+      unfold retired; rewrite (mstep_instr s _ _ _ Hph);
+      unfold semantics.execute, semantics.stepMem, semantics.execMem, semantics.assert_or_error, semantics.nextPc, WIDTH;
+      rewrite Hmmio, Hal;
+      unfold semantics.execute, semantics.stepMem, semantics.execMem, semantics.assert_or_error, semantics.nextPc, WIDTH in HL;
+      rewrite Hmmio, Hal in HL.
+      + (* lw *)
+        destruct HQ as [_ HQ]. destruct HL as [_ HL].
+        revert HQ HL.
+        match goal with |- context [coqutil.Map.Memory.load_bytes mem ?a 4] =>
+          destruct (coqutil.Map.Memory.load_bytes mem a 4) as [bs |] eqn:HLB end;
+        intros HQ HL.
+        * eexists; split; [| split; [exact HQ | rewrite update_mmio_phase; reflexivity]].
+          apply related_update_mmio.
+          eapply related_idle; cbn [fst snd];
+          [ right; reflexivity
+          | unfold RecordSet.set; cbn [fst snd];
+            constructor; cbn;
+            [ exact Hw | exact Hreq | exact Hresp | exact Hint
+            | eapply regs_related_set'; [| exact Hregs];
+              rewrite Zmod.of_Z_signed; symmetry; exact (load_word_related _ _ _ _ _ _ Hmem Hnw HLB)
+            | rewrite Hnpc, lit4; reflexivity
+            | rewrite Hnpc, lit4; reflexivity
+            | exact Hmem | exact Hlog ]
+          | cbn [getTrace getMachine RiscvMachine.getTrace]; exact HL ].
+        * exfalso. unfold nonmem_load in HQ. destruct HQ as [HMM _].
+          apply mmio_spec_agrees in HMM. exact (Hnm HMM).
+      + (* sw *)
+        rewrite Zmod.of_Z_unsigned in HQ, HL.
+        revert HQ HL.
+        match goal with |- context [coqutil.Map.Memory.load_bytes mem ?a 4] =>
+          destruct (coqutil.Map.Memory.load_bytes mem a 4) as [bs |] eqn:HLB end;
+        intros HQ HL.
+        * cbn [updatePc withXAddrs withMem RiscvMachine.withXAddrs RiscvMachine.withMem
+               withPc withNextPc RiscvMachine.withPc RiscvMachine.withNextPc
+               getPc getNextPc RiscvMachine.getPc RiscvMachine.getNextPc] in HQ, HL.
+          eexists; split; [| split; [exact HQ | rewrite update_mmio_phase; reflexivity]].
+          apply related_update_mmio.
+          eapply related_idle; cbn [fst snd];
+          [ right; reflexivity
+          | unfold RecordSet.set; cbn [fst snd];
+            constructor; cbn;
+            [ exact Hw | exact Hreq | exact Hresp | exact Hint | exact Hregs
+            | rewrite Hnpc, lit4; reflexivity
+            | rewrite Hnpc, lit4; reflexivity
+            | exact (mem_related_store _ _ _ _ _ _ bs Hmem Hnw HLB)
+            | exact Hlog ]
+          | cbn [getTrace getMachine RiscvMachine.getTrace]; exact HL ].
+        * exfalso. unfold nonmem_store in HQ. destruct HQ as [HMM _].
+          apply mmio_spec_agrees in HMM. exact (Hnm HMM).
+    - match goal with Hi : inflight_related _ _ |- _ =>
+        destruct (inflight_phase _ _ Hi) as [req Hw]; cbn in Hw; rewrite Hph in Hw; discriminate end.
+  Qed.
 
   Lemma retire_csr_or_invalid : forall s l m Q inst,
       related (s, l) m -> run1_step m Q -> s.(semantics.Phase) = StepInstr inst ->
