@@ -39,7 +39,9 @@ From coqutil Require Semantics.OmniSmallstepCombinators.
 From riscv Require Import Utility.Utility Utility.Monads Spec.Decode
   Spec.Primitives Spec.LeakageOfInstr Platform.RiscvMachine
   Platform.MetricRiscvMachine Platform.Run Utility.MkMachineWidth
-  Utility.runsToNonDet Utility.Words32Naive.
+  Utility.runsToNonDet Utility.Words32Naive Utility.FreeMonad
+  Platform.MetricLogging Platform.MaterializeRiscvProgram
+  Platform.MetricMaterializeRiscvProgram Platform.MinimalMMIO Platform.MetricMinimalMMIO.
 From riscv Require Spec.Machine.
 From granite.core Require Import Bits.
 From granite.isaSpec Require Import Common IFC Memory RegisterFile Riscv Spec.
@@ -154,23 +156,34 @@ Section Connection.
   (* riscv-coq registers are indexed by [Z] (its [Register]); granite's [Register] is [bits 5] *)
   Context {Registers : map.map Z word} {Mem : map.map word byte}.
   Local Notation MetricRiscvMachine := (@MetricRiscvMachine 32 Words32Naive Registers Mem).
-  Context {MW : MachineWidth word}.
-  Context {M : Type -> Type} {MM : Monad M}.
-  Context {RVM : Spec.Machine.RiscvProgramWithLeakage M word}.
-  Context {RVS : @Spec.Machine.RiscvMachine M word MM MW (@Spec.Machine.RVP _ _ M word MM MW RVM)}.
-  (* the platform: e.g. [MinimalMMIO]/[MetricMinimalMMIO] with the FE310 [MMIOSpec],
-     which is what the bedrock2 compiler and fiat-crypto's GarageDoor use *)
-  Context {PP : @PrimitivesParams 32 Words32Naive Registers Mem M MetricRiscvMachine}.
+
+  (* The platform is the concrete [MetricMinimalMMIO] one (bedrock2's compiler
+     and fiat-crypto's GarageDoor run on it).  An abstract [PrimitivesParams]
+     would not do: riscv-coq's [Primitives] class only gives sufficient
+     conditions for [mcomp_sat], so a hypothesis [mcomp_sat run1 m Q] on an
+     abstract platform says nothing about the successor riscv-coq takes; the
+     Kami connection inverts the concrete interpreter for the same reason. *)
+  Context {mmio_spec : @MMIOSpec 32 Words32Naive Mem}.
+  Local Notation M := (free (@action 32 Words32Naive) (@result 32 Words32Naive)).
+  Local Notation RVM := (@MetricMaterializeWithLeakage 32 Words32Naive).
+  Local Notation RVP := (@Spec.Machine.RVP _ _ M word _ _ RVM).
+  (* [translate] etc.: the default identity translation (no alignment traps) *)
+  Context {RVS : @Spec.Machine.RiscvMachine M word _ _ RVP}.
+  Local Notation PP := (@MetricMinimalMMIOPrimitivesParams 32 Words32Naive Mem Registers mmio_spec).
 
   Definition iset : InstructionSet := RV32IM.
 
   (* one riscv-coq instruction as an omnisemantics step *)
   Definition run1_step (m : MetricRiscvMachine) (P : MetricRiscvMachine -> Prop) : Prop :=
-    mcomp_sat (run1 iset) m (fun (_ : unit) m' => P m').
+    mcomp_sat (PrimitivesParams := PP) (run1 (RVS := RVS) iset) m (fun (_ : unit) m' => P m').
 
-  (* holds for every riscv-coq platform (e.g. [MinimalMMIO.interpret_action_weaken_post]) *)
-  Hypothesis run1_step_weaken : forall m P Q,
+  Lemma run1_step_weaken : forall m P Q,
       (forall x, P x -> Q x) -> run1_step m P -> run1_step m Q.
+  Proof.
+    unfold run1_step. cbv [mcomp_sat PP MetricMinimalMMIOPrimitivesParams]. intros m P Q HPQ H.
+    exact (free.interp_weaken_post _ MetricMinimalMMIO.interp_action_weaken_post _ _ _ _
+             (fun r s HP => HPQ s HP) H).
+  Qed.
 
   (* granite side: the reference semantics machine of [isaSpec/Spec.v] *)
   Context {defaultMachine : Machine.machine IFC.Input IFC.Output}.
@@ -194,18 +207,31 @@ Section Connection.
      its request is accepted, a load when its response is accepted *)
   Context (cycle_mmio : GSt -> GInput -> list MMIOEvent).
 
-  (* which per-cycle inputs the theorems quantify over *)
-  Context (admissible : GInput -> Prop).
+  (* Which per-cycle inputs the theorems quantify over.  RESTRICTIONS (not
+     discrepancies): riscv-coq has no interrupts, so no input asserts one; and
+     one cycle executes at most one driver micro-step, so that a cycle retires
+     at most one instruction (a driver list of length 3 would retire a whole
+     instruction, of length 6 two; the one-step [core] shape needs at most one). *)
+  Definition admissible (i : GInput) : Prop :=
+    (fst (fst i)).(PubInput_interruptValid) = false /\
+    (length (snd i).(DriverOut_nSteps) <= 1)%nat.
 
-  (* OPEN ISSUE (interrupts): riscv-coq has no interrupts, so admissible inputs
-     never assert one *)
-  Hypothesis admissible_no_interrupt : forall i,
-      admissible i -> (fst (fst i)).(PubInput_interruptValid) = false.
+  (* fair inputs, for [eventually]: the driver schedules a micro-step and the
+     MMIO handshake is ready and valid, so that granite cannot stutter forever *)
+  Definition fair (i : GInput) : Prop :=
+    admissible i /\
+    (snd i).(DriverOut_nSteps) <> [] /\
+    (fst (fst i)).(PubInput_mmio).(PubHandshake_ready) = true /\
+    (fst (fst i)).(PubInput_mmio).(PubHandshake_valid) = true.
 
-  (* one granite clock cycle as an omnisemantics step over admissible inputs *)
+  Definition next (g : GState) (i : GInput) : GState :=
+    (fst (Machine.step GM (fst g) i), cycle_mmio (fst g) i ++ snd g).
+
+  (* one granite clock cycle as an omnisemantics step *)
   Definition granite_step (g : GState) (P : GState -> Prop) : Prop :=
-    forall i, admissible i ->
-      P (fst (Machine.step GM (fst g) i), cycle_mmio (fst g) i ++ snd g).
+    forall i, admissible i -> P (next g i).
+  Definition granite_step_fair (g : GState) (P : GState -> Prop) : Prop :=
+    forall i, fair i -> P (next g i).
 
   Lemma granite_step_weaken : forall g P Q,
       (forall x, P x -> Q x) -> granite_step g P -> granite_step g Q.
@@ -299,19 +325,19 @@ Section Connection.
       granite_decodes w -> to_riscv (instrs.Decode.decode w) = decode iset (Zmod.unsigned w).
   Proof. Admitted.
 
-  (* OPEN ISSUE (CSRs, traps, MPIE, mtvec, mie): the relation has no CSR
-     component and the trap paths differ (granite#1, riscv-coq#61).  We assume
-     the platform makes CSR accesses impossible, as [MinimalMMIO] does
-     ([GetCSRField]/[SetCSRField] interpret to [False]); then no riscv-coq run
-     in any hypothesis executes a CSR instruction or takes a trap
-     ([raiseExceptionWithInfo] writes CSR fields), and granite's trap behaviour
-     never matters. *)
-  Local Notation RVP := (@Spec.Machine.RVP _ _ M word MM MW RVM).
-  Hypothesis csr_primitives_stuck :
+  (* CSRs, traps, MPIE, mtvec, mie (granite#1, riscv-coq#61): the relation has
+     no CSR component and the trap paths differ.  On this platform CSR accesses
+     are impossible ([GetCSRField]/[SetCSRField] interpret to [False],
+     [MinimalMMIO.interpret_action]) and every trap goes through
+     [raiseExceptionWithInfo], which writes CSR fields; so no riscv-coq run in
+     a hypothesis executes a CSR instruction or takes a trap, and granite's
+     trap behaviour never matters.  This is a lemma, not an assumption. *)
+  Lemma csr_primitives_stuck :
     (forall f m (post : MachineInt -> MetricRiscvMachine -> Prop),
         ~ mcomp_sat (PrimitivesParams := PP) (Spec.Machine.getCSRField (RiscvProgram := RVP) f) m post) /\
     (forall f v m (post : unit -> MetricRiscvMachine -> Prop),
         ~ mcomp_sat (PrimitivesParams := PP) (Spec.Machine.setCSRField (RiscvProgram := RVP) f v) m post).
+  Proof. split; intros; exact id. Qed.
 
   (* OPEN ISSUE (misaligned data accesses): granite traps, riscv-coq's default
      [translate] does not.  Either the platform's [translate] checks alignment
@@ -342,19 +368,26 @@ Section Connection.
      instruction ([execStrt]/[execCtrl]/[execMem] of [Spec.v] against
      [ExecuteI]/[ExecuteM] unfolded through the platform), the MMIO wait
      sequence, and the phase bookkeeping. *)
-  Lemma cycle_sim : forall g m Q,
-      related g m -> run1_step m Q ->
-      granite_step g (fun g' => (exists m', related g' m' /\ Q m') \/
-                                (related g' m /\ measure g' < measure g)).
+  Lemma cycle_sim_i : forall g m Q i,
+      related g m -> run1_step m Q -> admissible i ->
+      (exists m', related (next g i) m' /\ Q m') \/
+      (related (next g i) m /\ (fair i -> measure (next g i) < measure g)).
   Proof. Admitted.
 
-  (* the lax form of [cycle_sim] (no measure), for [always] *)
-  Lemma cycle_sim_lax : forall g m Q,
+  (* the two forms the generic section consumes *)
+  Lemma cycle_sim : forall g m Q,
       related g m -> run1_step m Q ->
       granite_step g (fun g' => (exists m', related g' m' /\ Q m') \/ related g' m).
   Proof.
-    intros g m Q HR HQ. eapply granite_step_weaken. 2: exact (cycle_sim g m Q HR HQ).
-    intros g' [H | [H _]]; eauto.
+    intros g m Q HR HQ i Hi. destruct (cycle_sim_i g m Q i HR HQ Hi) as [H | [H _]]; eauto.
+  Qed.
+
+  Lemma cycle_sim_fair : forall g m Q,
+      related g m -> run1_step m Q ->
+      granite_step_fair g (fun g' => (exists m', related g' m' /\ Q m') \/
+                                     (related g' m /\ measure g' < measure g)).
+  Proof.
+    intros g m Q HR HQ i Hi. destruct (cycle_sim_i g m Q i HR HQ (proj1 Hi)) as [H | [H Hlt]]; eauto.
   Qed.
 
   (** ** Corollaries: two-line applications of the generic section *)
@@ -369,7 +402,7 @@ Section Connection.
       always granite_step (lift_g P) g.
   Proof.
     intros P g m HR H.
-    exact (transfer_always run1_step granite_step related granite_step_weaken cycle_sim_lax P m g HR H).
+    exact (transfer_always run1_step granite_step related granite_step_weaken cycle_sim P m g HR H).
   Qed.
 
   (* [eventually]/[runsTo] transfer: granite reaches, in finitely many cycles
@@ -377,19 +410,19 @@ Section Connection.
   Corollary granite_eventually : forall (P : MetricRiscvMachine -> Prop) g m,
       related g m ->
       eventually run1_step P m ->
-      eventually granite_step (lift_g P) g.
+      eventually granite_step_fair (lift_g P) g.
   Proof.
     intros P g m HR H.
-    exact (transfer_eventually run1_step granite_step related measure cycle_sim P m g HR H).
+    exact (transfer_eventually run1_step granite_step_fair related measure cycle_sim_fair P m g HR H).
   Qed.
 
   Corollary granite_runsTo : forall (P : MetricRiscvMachine -> Prop) g m,
       related g m ->
       runsTo run1_step m P ->
-      eventually granite_step (lift_g P) g.
+      eventually granite_step_fair (lift_g P) g.
   Proof.
     intros P g m HR H.
-    exact (transfer_runsTo run1_step granite_step related measure cycle_sim P m g HR H).
+    exact (transfer_runsTo run1_step granite_step_fair related measure cycle_sim_fair P m g HR H).
   Qed.
 
   (* the bedrock2 event-loop shape ([always (eventually good_trace)],
@@ -398,11 +431,11 @@ Section Connection.
   Corollary granite_always_eventually : forall (P : MetricRiscvMachine -> Prop) g m,
       related g m ->
       always run1_step (eventually run1_step P) m ->
-      always granite_step (eventually granite_step (lift_g P)) g.
+      always granite_step (eventually granite_step_fair (lift_g P)) g.
   Proof.
     intros P g m HR H.
-    exact (transfer_always_eventually run1_step granite_step granite_step related measure
-             granite_step_weaken cycle_sim_lax cycle_sim P m g HR H).
+    exact (transfer_always_eventually run1_step granite_step granite_step_fair related measure
+             granite_step_weaken cycle_sim cycle_sim_fair P m g HR H).
   Qed.
 
   (** ** Composition with a trace property (GarageDoor / End2EndLightbulb shape) *)
@@ -423,7 +456,7 @@ Section Connection.
   Corollary granite_io_spec : forall g m,
       related g m ->
       always run1_step (eventually run1_step (fun m' => io_spec_riscv m'.(getLog))) m ->
-      always granite_step (eventually granite_step (fun g' => io_spec (snd g'))) g.
+      always granite_step (eventually granite_step_fair (fun g' => io_spec (snd g'))) g.
   Proof.
     intros g m HR H.
     pose proof (granite_always_eventually _ g m HR H) as H'.
