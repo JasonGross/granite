@@ -490,8 +490,8 @@ Section Connection.
       end.
 
   (* granite assembles the B-type immediate with nested [Zmod.app]; riscv-coq
-     with shifted [Z.lor]s.  Provable by bit extensionality ([Z.bits_inj'] with
-     [Z.lor_spec]/[Z.shiftl_spec]); decoder bookkeeping, not a discrepancy. *)
+     with shifted [Z.lor]s.  No range facts are needed: [unsigned_app] turns
+     each [app] into a shifted [lor], and the rest is [lor] associativity. *)
   Lemma b_imm_agree : forall w : word,
       Zmod.unsigned (Zmod.app (zeroes : bits 1)
                        (Zmod.app (Zmod.slice 8 12 w)
@@ -501,7 +501,18 @@ Section Connection.
                             (Z.shiftl (Zmod.unsigned (Zmod.slice 25 31 w)) 5))
                      (Z.shiftl (Zmod.unsigned (Zmod.slice 8 12 w)) 1))
               (Z.shiftl (Zmod.unsigned (Zmod.slice 7 8 w)) 11).
-  Proof. (* ADMIT: decoder immediate bookkeeping (B-type), not a discrepancy *) Admitted.
+  Proof.
+    intros w.
+    rewrite !bits.unsigned_app by lia.
+    rewrite unsigned_literal.
+    generalize (Zmod.unsigned (Zmod.slice 8 12 w)) as a.
+    generalize (Zmod.unsigned (Zmod.slice 25 31 w)) as b.
+    generalize (Zmod.unsigned (Zmod.slice 7 8 w)) as c.
+    generalize (Zmod.unsigned (Zmod.slice 31 32 w)) as d.
+    intros d c b a.
+    rewrite !Z.shiftl_lor, !Z.shiftl_shiftl by lia. cbn [Z.add Pos.add Pos.succ].
+    Z.bitblast.
+  Qed.
 
   (* [rewrite] must match [Zmod.unsigned] arguments up to conversion (the
      modulus annotations differ between granite's field types and the lemmas) *)
