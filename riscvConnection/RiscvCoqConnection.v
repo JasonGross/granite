@@ -1140,11 +1140,178 @@ Section Connection.
       retired (mstep dmd s x) l Q.
   Proof. (* ADMIT: leakage alignment (granite's mul leaks the zero-operand bit) *) Admitted.
 
+  (* the alignment tests: riscv-coq's [remu addr 4 /= 0], granite's [is_word_aligned 4] *)
+  Lemma aligned_agree : forall t : word,
+      negb (Zmod.eqb (Zmod.umod t (Zmod.of_Z (2 ^ 32) 4)) (Zmod.of_Z (2 ^ 32) 0)) =
+      negb (semantics.is_word_aligned 4 t).
+  Proof.
+    intros t. unfold semantics.is_word_aligned. f_equal.
+    assert (H3 : Zmod.unsigned (Zmod.sub (of_N 32 4) (1%Zmod : mword)) = 3%Z) by (vm_compute; reflexivity).
+    assert (Ht : Zmod.unsigned (Zmod.umod t (Zmod.of_Z (2 ^ 32) 4)) = Zmod.unsigned (Zmod.and t (Zmod.sub (of_N 32 4) 1%Zmod))).
+    { rewrite Zmod.unsigned_umod, Zmod.unsigned_and, H3.
+      change 3%Z with (Z.ones 2). rewrite Z.land_ones by lia.
+      rewrite (Zmod.unsigned_of_Z_small (m := 2 ^ 32) 4) by (change (2 ^ 32)%Z with 4294967296%Z; lia).
+      change (2 ^ 2)%Z with 4%Z.
+      rewrite (Z.mod_small (Zmod.unsigned t mod 4) (2 ^ 32)); [reflexivity |].
+      pose proof (Z.mod_pos_bound (Zmod.unsigned t) 4 ltac:(lia)) as Hb. pow32.
+      lia. }
+    destruct (Zmod.eqb_spec (Zmod.umod t (Zmod.of_Z (2 ^ 32) 4)) (Zmod.of_Z (2 ^ 32) 0)) as [E | NE];
+      case_bool_decide as E'; try reflexivity; exfalso.
+    - apply E'. apply Zmod.unsigned_inj. rewrite <- Ht, E. vm_compute. reflexivity.
+    - apply NE. apply Zmod.unsigned_inj. rewrite Ht, E'. vm_compute. reflexivity.
+  Qed.
+
+  Lemma lnot1 : Zmod.xor (Zmod.of_Z (2 ^ 32) 1) (bits.of_Z 32 (2 ^ 32 - 1)) = Zmod.not (1%Zmod : mword).
+  Proof. apply Zmod.unsigned_inj. vm_compute. reflexivity. Qed.
+
+  Local Ltac ctrl_reduce H :=
+    cbn [LeakageOfInstr.leakage_of_instr LeakageOfInstr.instr_leakage LeakageOfInstr.leakage_of_instr_I
+         Bind Return free.Monad_free free.bind free.interp_fix free.interp_body interp_action interpret_action
+         id Option.option_map2 when
+         Execute.execute ExecuteI.execute
+         Spec.Machine.getRegister Spec.Machine.setRegister Spec.Machine.getPC Spec.Machine.setPC
+         Spec.Machine.endCycleNormal Spec.Machine.leakEvent Spec.Machine.RVP
+         Spec.Machine.raiseExceptionWithInfo Spec.Machine.getCSRField Spec.Machine.setCSRField
+         MetricMaterializeWithLeakage MetricMaterialize fst snd option_map
+         getMachine getMetrics RiscvMachine.withLeakageEvent
+         MetricRiscvMachine.withRegs MetricRiscvMachine.withPc MetricRiscvMachine.withNextPc
+         RiscvMachine.withRegs RiscvMachine.withPc RiscvMachine.withNextPc updatePc
+         RiscvMachine.getRegs RiscvMachine.getPc RiscvMachine.getNextPc RiscvMachine.getMem
+         RiscvMachine.getXAddrs RiscvMachine.getLog RiscvMachine.getTrace
+         reg_eqb remu add and xor maxUnsigned ZToReg MachineWidth_XLEN lnot] in H.
+
+  (* the common tail of a retiring control micro-step, after the branch
+     decision and the alignment test have been resolved in [HQ] and the
+     granite side has been unfolded; [pc] is the riscv-coq pc variable *)
+  Local Ltac ctrl_prep s l HF HD HR Hph HL :=
+    pose proof (leak_retire s l _ _ HR Hph I) as HL;
+    reduce_run1 HL; destruct HL as [_ HL]; unfold Memory.loadWord in HL; rewrite HF in HL;
+    rewrite <- HD in HL; ctrl_reduce HL.
+
+  Local Ltac ctrl_finish s HQ HL Hph :=
+    unfold retired; rewrite (mstep_instr s _ _ _ Hph);
+    eexists; split; [| split; [exact HQ | rewrite update_mmio_phase; reflexivity]];
+    apply related_update_mmio;
+    eapply related_idle; cbn [fst snd];
+    [ right; reflexivity
+    | unfold semantics.execute, semantics.stepCtrl, semantics.execCtrl, semantics.nextPc,
+        semantics.assert_or_error, RecordSet.set, WIDTH
+    | cbn [getTrace getMachine RiscvMachine.getTrace]; exact HL ].
+
   Lemma retire_ctrl : forall s l m Q x dmd inst,
       related (s, l) m -> run1_step m Q -> s.(semantics.Phase) = StepInstr inst ->
       (match inst with instrs.Ctrl _ => True | _ => False end) ->
       retired (mstep dmd s x) l Q.
-  Proof. (* ADMIT: not a discrepancy; branch/jalr class unfinished; the misaligned-target trap is excluded by the platform *) Admitted.
+  Proof.
+    intros s l m Q x dmd inst HR HQ Hph Hcls.
+    pose proof HR as HR0.
+    inversion HR; subst; cbn in *.
+    - match goal with Hd : _ \/ _ |- _ => destruct Hd as [Hd | Hd]; rewrite Hph in Hd; discriminate end.
+    - match goal with HP : semantics.Phase s = StepInstr _ |- _ => rewrite Hph in HP; inversion HP; subst inst end.
+      match goal with Hc : core_related s l m |- _ => rename Hc into Hcore end.
+      destruct m as [[regs pc npc mem xaddrs log trace] metrics].
+      reduce_run1 HQ.
+      destruct HQ as [HX HQ]; specialize (HX eq_refl).
+      pose proof (fetch_related s l _ Hcore HX) as HF; cbn [getMachine getMem getPc] in HF.
+      unfold Memory.loadWord in HF; rewrite HF in HQ.
+      set (w := baseMem.LoadWord (semantics.Pc (semantics.ArchSt s)) (semantics.Imem (semantics.ArchSt s))) in *.
+      assert (Hdec : granite_decodes w) by (unfold granite_decodes; destruct (instrs.Decode.decode w); solve [exact I | exact Hcls]).
+      pose proof (decode_agree w Hdec) as HD.
+      destruct (instrs.Decode.decode w) as [si | ci | mi | w'] eqn:Egi;
+      [ exfalso; exact Hcls | destruct ci | exfalso; exact Hcls | exfalso; exact Hcls ];
+      cbn [to_riscv] in HD; rewrite <- HD in HQ; ctrl_reduce HQ;
+      pose proof Hcore as Hc0;
+      destruct Hc0 as [Hw Hreq Hresp Hint Hregs Hpc Hnpc Hmem Hlog];
+      cbn [getMachine getRegs getPc getNextPc getMem getXAddrs getLog getTrace
+           RiscvMachine.getRegs RiscvMachine.getPc RiscvMachine.getNextPc RiscvMachine.getMem
+           RiscvMachine.getXAddrs RiscvMachine.getLog RiscvMachine.getTrace] in Hregs, Hpc, Hnpc, Hmem, Hlog.
+      + (* beq *)
+        ctrl_prep s l HF HD HR0 Hph HL.
+        rewrite !(regs_related_get _ _ _ Hregs) in HQ, HL.
+        unfold signExtend in HQ, HL; rewrite ?bits.smod_unsigned in HQ, HL.
+        rewrite aligned_agree in HQ, HL.
+        revert HQ HL.
+        match goal with |- context [when (@Zmod.eqb ?md ?a ?b) _] =>
+          destruct (@Zmod.eqb md a b) eqn:Heqb;
+          [ pose proof (proj1 (Zmod.eqb_eq a b) Heqb) as Heq
+          | assert (Hne : a <> b) by (intro E; apply (proj2 (@Zmod.eqb_eq md a b)) in E; congruence) ] end;
+        cbn [when];
+        [ match goal with |- context [semantics.is_word_aligned 4 ?t] =>
+            destruct (semantics.is_word_aligned 4 t) eqn:Hal end; cbn [negb] |];
+        intros HQ HL; ctrl_reduce HQ; ctrl_reduce HL.
+        * (* taken, aligned *)
+          ctrl_finish s HQ HL Hph.
+          case_bool_decide; [| contradiction].
+          rewrite <- Hpc, Hal. cbn [fst snd].
+          constructor; cbn;
+          [ exact Hw | exact Hreq | exact Hresp | exact Hint | exact Hregs
+          | first [reflexivity | rewrite lit4; reflexivity]
+          | first [reflexivity | rewrite lit4; reflexivity]
+          | exact Hmem | exact Hlog ].
+        * (* taken, misaligned: riscv-coq traps, which this platform cannot do *)
+          exfalso; exact HQ.
+        * (* not taken *)
+          ctrl_finish s HQ HL Hph.
+          case_bool_decide; [contradiction |]. cbn [fst snd].
+          constructor; cbn;
+          [ exact Hw | exact Hreq | exact Hresp | exact Hint | exact Hregs
+          | rewrite Hnpc, lit4; reflexivity
+          | rewrite Hnpc, lit4; reflexivity
+          | exact Hmem | exact Hlog ].
+      + (* jalr *)
+        ctrl_prep s l HF HD HR0 Hph HL.
+        rewrite !(regs_related_get _ _ _ Hregs) in HQ, HL.
+        unfold signExtend in HQ, HL; rewrite ?bits.smod_unsigned in HQ, HL.
+        rewrite lnot1, aligned_agree in HQ, HL.
+        revert HQ HL.
+        match goal with |- context [semantics.is_word_aligned 4 ?t] =>
+          destruct (semantics.is_word_aligned 4 t) eqn:Hal end; cbn [negb];
+        intros HQ HL; ctrl_reduce HQ; ctrl_reduce HL.
+        * (* aligned *)
+          ctrl_finish s HQ HL Hph.
+          rewrite Hal. cbn [fst snd].
+          constructor; cbn;
+          [ exact Hw | exact Hreq | exact Hresp | exact Hint
+          | eapply regs_related_set'; [| exact Hregs]; rewrite lit4, Hpc; reflexivity
+          | first [reflexivity | rewrite lit4; reflexivity]
+          | first [reflexivity | rewrite lit4; reflexivity]
+          | exact Hmem | exact Hlog ].
+        * exfalso; exact HQ.
+      + (* bne *)
+        ctrl_prep s l HF HD HR0 Hph HL.
+        rewrite !(regs_related_get _ _ _ Hregs) in HQ, HL.
+        unfold signExtend in HQ, HL; rewrite ?bits.smod_unsigned in HQ, HL.
+        rewrite aligned_agree in HQ, HL.
+        revert HQ HL.
+        match goal with |- context [when (negb (@Zmod.eqb ?md ?a ?b)) _] =>
+          destruct (@Zmod.eqb md a b) eqn:Heqb;
+          [ pose proof (proj1 (Zmod.eqb_eq a b) Heqb) as Heq
+          | assert (Hne : a <> b) by (intro E; apply (proj2 (@Zmod.eqb_eq md a b)) in E; congruence) ] end;
+        cbn [negb when];
+        [ | match goal with |- context [semantics.is_word_aligned 4 ?t] =>
+              destruct (semantics.is_word_aligned 4 t) eqn:Hal end; cbn [negb] ];
+        intros HQ HL; ctrl_reduce HQ; ctrl_reduce HL.
+        * (* not taken *)
+          ctrl_finish s HQ HL Hph.
+          case_bool_decide; [contradiction |]. cbn [fst snd].
+          constructor; cbn;
+          [ exact Hw | exact Hreq | exact Hresp | exact Hint | exact Hregs
+          | rewrite Hnpc, lit4; reflexivity
+          | rewrite Hnpc, lit4; reflexivity
+          | exact Hmem | exact Hlog ].
+        * (* taken, aligned *)
+          ctrl_finish s HQ HL Hph.
+          case_bool_decide; [| contradiction].
+          rewrite <- Hpc, Hal. cbn [fst snd].
+          constructor; cbn;
+          [ exact Hw | exact Hreq | exact Hresp | exact Hint | exact Hregs
+          | first [reflexivity | rewrite lit4; reflexivity]
+          | first [reflexivity | rewrite lit4; reflexivity]
+          | exact Hmem | exact Hlog ].
+        * exfalso; exact HQ.
+    - match goal with Hi : inflight_related _ _ |- _ =>
+        destruct (inflight_phase _ _ Hi) as [req Hw]; cbn in Hw; rewrite Hph in Hw; discriminate end.
+  Qed.
 
   (* memory: a non-MMIO access retires; an MMIO access issues its request and
      waits, with the request in the buffer *)
@@ -1514,8 +1681,18 @@ Section Connection.
   Proof.
     intros g m HR H.
     pose proof (granite_always_eventually _ g m HR H) as H'.
-    (* weaken [lift_g (fun m' => io_spec_riscv (getLog m'))] to [io_spec (snd g')]
-       through [io_spec_compat] and the [log_related] component of [related] *)
+    (* ADMIT: MMIO wait phases (roadblock, not a discrepancy).  The weakening
+       from [lift_g (fun m' => io_spec_riscv (getLog m'))] to [io_spec (snd g')]
+       needs [log_related (snd g') (getLog m')] for every [related g' m'].
+       Idle and post-leak states have it ([cr_log]); a waiting state does not:
+       granite logs an MMIO store when the request leaves the buffer, riscv-coq
+       when the instruction completes, so during the wait the two logs differ
+       by that event.  The states that [transfer_eventually] produces are never
+       waiting (a retirement lands in [StepInterrupt]), but the generic section
+       does not record that.  The fix is to give the generic section a second
+       relation for the retirement targets (or to strengthen [related] in the
+       [retired] clause) and to prove [log_related] for those; that changes
+       [cycle_sim]'s statement and is left for the MMIO wait work. *)
     admit.
   Admitted.
 
