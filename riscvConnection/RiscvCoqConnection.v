@@ -43,7 +43,7 @@ From riscv Require Import Utility.Utility Utility.Monads Spec.Decode
   Platform.MetricLogging Platform.MaterializeRiscvProgram
   Platform.MetricMaterializeRiscvProgram Platform.MinimalMMIO Platform.MetricMinimalMMIO.
 From riscv Require Spec.Machine.
-From stdpp Require Import list_numbers.
+From stdpp Require Import list_numbers finite vector.
 From RecordUpdate Require Import RecordSet. Import RecordSetNotations.
 From granite.core Require Import Bits.
 From granite.isaSpec Require Import Common IFC Memory RegisterFile Riscv Spec.
@@ -156,7 +156,7 @@ Section Connection.
   (* riscv-coq side.  Granite is 32-bit ([Common.WIDTH]). *)
   Local Notation word := (bits 32).
   (* riscv-coq registers are indexed by [Z] (its [Register]); granite's [Register] is [bits 5] *)
-  Context {Registers : map.map Z word} {Mem : map.map word byte}.
+  Context {Registers : map.map Z word} {Registers_ok : map.ok Registers} {Mem : map.map word byte}.
   Local Notation MetricRiscvMachine := (@MetricRiscvMachine 32 Words32Naive Registers Mem).
 
   (* The platform is the concrete [MetricMinimalMMIO] one (bedrock2's compiler
@@ -274,6 +274,63 @@ Section Connection.
     forall i : Z, (0 < i < 32)%Z ->
       map.get rr i = Some (registerFile.readReg (bits.of_Z LOG_NREGS i) rf).
 
+  Lemma encode_fin_inj `{Finite A} (x y : A) : encode_fin x = encode_fin y -> x = y.
+  Proof. intros E. rewrite <- (decode_encode_fin x), <- (decode_encode_fin y), E. reflexivity. Qed.
+
+  (* register [zeroes] on both sides *)
+  Lemma register_zero_iff : forall r : Register, Zmod.unsigned r = 0%Z <-> r = zeroes.
+  Proof.
+    intros r. split; intro E.
+    - apply Zmod.unsigned_inj. rewrite E. reflexivity.
+    - subst r. reflexivity.
+  Qed.
+  Lemma register_range : forall r : Register, (0 <= Zmod.unsigned r < 32)%Z.
+  Proof. intros r. pose proof (bits.unsigned_range r ltac:(unfold LOG_NREGS; lia)). unfold LOG_NREGS in *. lia. Qed.
+
+  Lemma regs_related_get : forall rf rr (r : Register),
+      regs_related rf rr -> getReg rr (Zmod.unsigned r) = registerFile.readReg r rf.
+  Proof.
+    intros rf rr r H. unfold getReg, registerFile.readReg.
+    destruct (decide (r = zeroes)) as [E | NE].
+    - subst r. cbn. apply Zmod.unsigned_inj. reflexivity.
+    - pose proof (register_range r) as Hr.
+      assert (Hne : Zmod.unsigned r <> 0%Z) by (intro E; apply NE, register_zero_iff, E).
+      replace ((0 <? Zmod.unsigned r)%Z && (Zmod.unsigned r <? 32)%Z) with true
+        by (symmetry; apply andb_true_iff; split; apply Z.ltb_lt; lia).
+      rewrite H by lia. unfold registerFile.readReg. rewrite Zmod.of_Z_unsigned.
+      destruct (decide (r = zeroes)); [contradiction | reflexivity].
+  Qed.
+
+  Lemma regs_related_set : forall rf rr (r : Register) v,
+      regs_related rf rr -> regs_related (registerFile.writeReg r v rf) (setReg (Zmod.unsigned r) v rr).
+  Proof.
+    intros rf rr r v H i Hi. unfold setReg, registerFile.writeReg.
+    assert (Hi0 : bits.of_Z LOG_NREGS i <> zeroes).
+    { intro E. apply (f_equal Zmod.unsigned) in E. rewrite unsigned_literal in E.
+      rewrite Zmod.unsigned_of_Z_small in E by (unfold LOG_NREGS; lia). lia. }
+    destruct (decide (r = zeroes)) as [E | NE].
+    - subst r. change (Zmod.unsigned (zeroes : Register)) with 0%Z. cbn [Z.ltb Z.compare andb].
+      rewrite H by lia. unfold registerFile.readReg.
+      case_decide; [contradiction |].
+      f_equal. symmetry. apply vlookup_insert_ne.
+      intro E. apply encode_fin_inj in E. apply Hi0. symmetry. exact E.
+    - pose proof (register_range r) as Hr.
+      assert (Hne : Zmod.unsigned r <> 0%Z) by (intro E; apply NE, register_zero_iff, E).
+      replace ((0 <? Zmod.unsigned r)%Z && (Zmod.unsigned r <? 32)%Z) with true
+        by (symmetry; apply andb_true_iff; split; apply Z.ltb_lt; lia).
+      destruct (Z.eq_dec i (Zmod.unsigned r)) as [Ei | Ni].
+      + subst i. rewrite map.get_put_same. unfold registerFile.readReg.
+        rewrite Zmod.of_Z_unsigned.
+        case_decide; [contradiction |].
+        f_equal. symmetry. apply vlookup_insert.
+      + rewrite map.get_put_diff by exact Ni. rewrite H by lia. unfold registerFile.readReg.
+        case_decide; [contradiction |].
+        f_equal. symmetry. apply vlookup_insert_ne.
+        intro E. apply encode_fin_inj in E. apply Ni.
+        apply (f_equal Zmod.unsigned) in E. rewrite Zmod.unsigned_of_Z_small in E by (unfold LOG_NREGS; lia).
+        symmetry. exact E.
+  Qed.
+
   (* granite is Harvard (separate [Imem]/[Dmem], both total); riscv-coq has one
      partial byte map plus the executable-address set [getXAddrs].  Relate the
      data memory everywhere outside MMIO, and require the instruction memory to
@@ -363,7 +420,7 @@ Section Connection.
   (* the word riscv-coq fetches next, if any *)
   Definition next_instr (m : MetricRiscvMachine) : option Instruction :=
     match Memory.loadWord m.(getMem) m.(getPc) with
-    | Some w => Some (decode iset (Zmod.unsigned w))
+    | Some w => Some (Decode.decode iset (Zmod.unsigned w))
     | None => None
     end.
 
@@ -472,7 +529,7 @@ Section Connection.
           signExtend bitSlice Z.smodulo andb orb Z.eqb csr_index].
 
   Local Ltac riscv_reduce :=
-    unfold decode; cbv beta zeta;
+    unfold Decode.decode; cbv beta zeta;
     rewrite ?(bitSlice_firstn 7) by lia;
     repeat (rewrite bitSlice_slice by lia);
     repeat match goal with F : Zmod.unsigned _ = _ |- _ => rewrite F; clear F end;
@@ -519,7 +576,7 @@ Section Connection.
   Local Set Keyed Unification.
 
   Lemma decode_agree : forall w : word,
-      granite_decodes w -> to_riscv (instrs.Decode.decode w) = decode iset (Zmod.unsigned w).
+      granite_decodes w -> to_riscv (instrs.Decode.decode w) = Decode.decode iset (Zmod.unsigned w).
   Proof.
     intros w Hdec. unfold granite_decodes in Hdec.
     unfold instrs.Decode.decode in *. cbv zeta in *. unfold WIDTH in *.
@@ -922,6 +979,115 @@ Section Connection.
   Definition retired (s : GSt) (l : list MMIOEvent) (Q : MetricRiscvMachine -> Prop) : Prop :=
     exists m', related (s, l) m' /\ Q m' /\ s.(semantics.Phase) = StepInterrupt.
 
+  Local Opaque Decode.decode.
+  (* reduce [run1_step] to the fetch and the rest of the instruction; [decode]
+     stays folded until the fetched word is known *)
+  Local Ltac reduce_run1 H :=
+    unfold run1_step, run1 in H;
+    cbv [mcomp_sat PP MetricMinimalMMIOPrimitivesParams] in H;
+    cbn [Bind free.Monad_free free.bind free.interp free.interp_fix free.interp_body
+         interp_action interpret_action
+         Spec.Machine.getPC Spec.Machine.loadWord Spec.Machine.leakEvent Spec.Machine.RVP
+         Spec.Machine.getRegister Spec.Machine.setRegister Spec.Machine.setPC
+         Spec.Machine.endCycleNormal Spec.Machine.getPrivMode Spec.Machine.getCSRField
+         MetricMaterializeWithLeakage MetricMaterialize fst snd
+         getMachine getMetrics getRegs getPc getNextPc getMem getXAddrs getLog getTrace
+         RiscvMachine.withLeakageEvent] in H.
+
+  (* ADMIT-HYP: leakage alignment.  After granite's [StepLeak] micro-step
+     ([leak_related_ahead]), riscv-coq's step for the same instruction (its
+     [fetchInstr] and [executeInstr] events) realigns the two leakage traces
+     with granite's state after the instruction.  [mul] is excluded: granite's
+     [Mul_leakage] carries the zero-operand bit, riscv-coq's does not. *)
+  Hypothesis leak_retire : forall s l m inst,
+      related (s, l) m -> s.(semantics.Phase) = StepInstr inst ->
+      (match inst with instrs.Strt (instrs.Mul _ _ _) => False | _ => True end) ->
+      run1_step m (fun m' => leak_related (granite_leaks (semantics.execute inst s, l)) m'.(getTrace)).
+
+  Lemma mstep_instr : forall (s : GSt) x dmd inst,
+      s.(semantics.Phase) = StepInstr inst ->
+      mstep dmd s x = semantics.update_mmio (semantics.execute inst s) dmd.
+  Proof. intros s x dmd inst H. unfold mstep, semantics.doDriverStep. rewrite H. reflexivity. Qed.
+
+  Lemma update_mmio_phase : forall (s : GSt) dmd,
+      (semantics.update_mmio s dmd).(semantics.Phase) = s.(semantics.Phase).
+  Proof.
+    intros. unfold semantics.update_mmio, RecordSet.set. cbn.
+    destruct (semantics.Phase s); try reflexivity.
+    destruct (semantics.MMIOReqBuffer s); [destruct (semantics.MMIORespBuffer s) |]; reflexivity.
+  Qed.
+
+  Lemma lit4 : (4%Zmod : mword) = bits.of_Z 32 4.
+  Proof. apply Zmod.unsigned_inj. vm_compute. reflexivity. Qed.
+
+  Lemma regs_related_set' : forall rf rr (r : Register) v1 v2,
+      v1 = v2 -> regs_related rf rr ->
+      regs_related (registerFile.writeReg r v1 rf) (setReg (Zmod.unsigned r) v2 rr).
+  Proof. intros; subst; apply regs_related_set; assumption. Qed.
+
+  (* the 20-bit immediates: granite sign-extends then shifts in the machine
+     word, riscv-coq shifts then sign-extends in [Z] *)
+  Lemma imm20_agree : forall (x : bits 20),
+      Zmod.slu (bits.of_Z 32 (Zmod.signed x)) 12 = Zmod.of_Z (2 ^ 32) (signExtend 32 (Z.shiftl (Zmod.unsigned x) 12)).
+  Proof.
+    intros x. apply Zmod.unsigned_inj. unfold signExtend.
+    rewrite bits.unsigned_slu, !Zmod.unsigned_of_Z, Z.mod_smod, !Z.shiftl_mul_pow2 by lia.
+    rewrite <- bits.smod_unsigned.
+    set (u := Zmod.unsigned x). set (a := Z.smodulo u (2 ^ 20)).
+    pose proof (Z.mod_smod u (2 ^ 20)) as Hmod. fold a in Hmod.
+    change (2 ^ 32)%Z with 4294967296%Z in *. change (2 ^ 20)%Z with 1048576%Z in *. change (2 ^ 12)%Z with 4096%Z in *.
+    rewrite Z.mul_mod_idemp_l by lia.
+    pose proof (Z.div_mod a 1048576 ltac:(lia)) as Ha. pose proof (Z.div_mod u 1048576 ltac:(lia)) as Hu.
+    rewrite Hmod in Ha.
+    set (qa := (a / 1048576)%Z) in *. set (qu := (u / 1048576)%Z) in *. set (r := (u mod 1048576)%Z) in *.
+    clearbody qa qu r.
+    replace (a * 4096)%Z with (r * 4096 + qa * 4294967296)%Z by lia.
+    replace (u * 4096)%Z with (r * 4096 + qu * 4294967296)%Z by lia.
+    rewrite !Z.mod_add by lia. reflexivity.
+  Qed.
+
+  (* the common part of a retiring ALU micro-step: the riscv-coq successor is
+     the witness, the phase is [StepInterrupt], the wires and buffers are the
+     idle ones, memory and log are untouched, the leakage is [leak_retire];
+     what remains is the value written to [rd] *)
+  Local Ltac alu_reduce H :=
+    cbn [LeakageOfInstr.leakage_of_instr LeakageOfInstr.instr_leakage LeakageOfInstr.leakage_of_instr_I
+         Bind Return free.Monad_free free.bind free.interp_fix free.interp_body interp_action interpret_action
+         id Option.option_map2
+         Execute.execute ExecuteI.execute
+         Spec.Machine.getRegister Spec.Machine.setRegister Spec.Machine.getPC Spec.Machine.setPC
+         Spec.Machine.endCycleNormal Spec.Machine.leakEvent Spec.Machine.RVP
+         MetricMaterializeWithLeakage MetricMaterialize fst snd option_map
+         getMachine getMetrics RiscvMachine.withLeakageEvent
+         MetricRiscvMachine.withRegs MetricRiscvMachine.withPc MetricRiscvMachine.withNextPc
+         RiscvMachine.withRegs RiscvMachine.withPc RiscvMachine.withNextPc updatePc
+         RiscvMachine.getRegs RiscvMachine.getPc RiscvMachine.getNextPc RiscvMachine.getMem
+         RiscvMachine.getXAddrs RiscvMachine.getLog RiscvMachine.getTrace] in H.
+
+  Local Ltac alu_finish s l Egi HF HD HQ HR Hph Hc :=
+    let HL := fresh "HL" in
+    pose proof (leak_retire s l _ _ HR Hph I) as HL;
+    reduce_run1 HL; destruct HL as [_ HL]; unfold Memory.loadWord in HL; rewrite HF in HL;
+    rewrite <- HD in HL; alu_reduce HL;
+    unfold retired; rewrite (mstep_instr s _ _ _ Hph);
+    eexists; split; [| split; [exact HQ | rewrite update_mmio_phase; reflexivity]];
+    apply related_update_mmio;
+    eapply related_idle; cbn [fst snd];
+    [ right; reflexivity
+    | destruct Hc as [Hw Hreq Hresp Hint Hregs Hpc Hnpc Hmem Hlog];
+      cbn [getMachine getRegs getPc getNextPc getMem getXAddrs getLog getTrace
+           RiscvMachine.getRegs RiscvMachine.getPc RiscvMachine.getNextPc RiscvMachine.getMem
+           RiscvMachine.getXAddrs RiscvMachine.getLog RiscvMachine.getTrace] in Hpc, Hnpc, Hmem, Hlog |- *;
+      unfold semantics.execute, semantics.stepStrt, semantics.execStrt, semantics.nextPc, RecordSet.set;
+      cbn [fst snd];
+      constructor; cbn;
+      [ exact Hw | exact Hreq | exact Hresp | exact Hint
+      | idtac
+      | rewrite Hnpc, lit4; reflexivity
+      | rewrite Hnpc, lit4; reflexivity
+      | exact Hmem | exact Hlog ]
+    | cbn [getTrace getMachine RiscvMachine.getTrace]; exact HL ].
+
   Lemma retire_alu : forall s l m Q x dmd inst,
       related (s, l) m -> run1_step m Q -> s.(semantics.Phase) = StepInstr inst ->
       (match inst with
@@ -930,7 +1096,43 @@ Section Connection.
        | instrs.Strt (instrs.Lui _ _) | instrs.Strt (instrs.Auipc _ _) => True
        | _ => False end) ->
       retired (mstep dmd s x) l Q.
-  Proof. (* ADMIT: not a discrepancy; ALU class unfinished (see report) *) Admitted.
+  Proof.
+    intros s l m Q x dmd inst HR HQ Hph Hcls.
+    pose proof HR as HR0.
+    inversion HR; subst; cbn in *.
+    - match goal with Hd : _ \/ _ |- _ => destruct Hd as [Hd | Hd]; rewrite Hph in Hd; discriminate end.
+    - match goal with HP : semantics.Phase s = StepInstr _ |- _ => rewrite Hph in HP; inversion HP; subst inst end.
+      match goal with Hc : core_related s l m |- _ =>
+      destruct m as [[regs pc npc mem xaddrs log trace] metrics];
+      reduce_run1 HQ;
+      destruct HQ as [HX HQ]; specialize (HX eq_refl);
+      pose proof (fetch_related s l _ Hc HX) as HF; cbn [getMachine getMem getPc] in HF;
+      unfold Memory.loadWord in HF; rewrite HF in HQ;
+      set (w := baseMem.LoadWord (semantics.Pc (semantics.ArchSt s)) (semantics.Imem (semantics.ArchSt s))) in *;
+      assert (Hdec : granite_decodes w) by (unfold granite_decodes; destruct (instrs.Decode.decode w); solve [exact I | exact Hcls]);
+      pose proof (decode_agree w Hdec) as HD;
+      destruct (instrs.Decode.decode w) as [si | ci | mi | w'] eqn:Egi;
+      [ destruct si; try (exfalso; exact Hcls) | exfalso; exact Hcls | exfalso; exact Hcls | exfalso; exact Hcls ];
+      cbn [to_riscv] in HD; rewrite <- HD in HQ; alu_reduce HQ;
+      alu_finish s l Egi HF HD HQ HR0 Hph Hc
+      end.
+      + (* addi *) eapply regs_related_set'; [| exact Hregs].
+        rewrite (regs_related_get _ _ _ Hregs). unfold signExtend. rewrite bits.smod_unsigned. reflexivity.
+      + (* add *) eapply regs_related_set'; [| exact Hregs].
+        rewrite !(regs_related_get _ _ _ Hregs). reflexivity.
+      + (* auipc *) eapply regs_related_set'; [| exact Hregs].
+        unfold WIDTH. rewrite imm20_agree, Hpc. apply Zmod.add_comm.
+      + (* xor *) eapply regs_related_set'; [| exact Hregs].
+        rewrite !(regs_related_get _ _ _ Hregs). reflexivity.
+      + (* slli *) eapply regs_related_set'; [| exact Hregs].
+        rewrite (regs_related_get _ _ _ Hregs). reflexivity.
+      + (* srli *) eapply regs_related_set'; [| exact Hregs].
+        rewrite (regs_related_get _ _ _ Hregs). reflexivity.
+      + (* lui *) eapply regs_related_set'; [| exact Hregs].
+        unfold WIDTH. apply imm20_agree.
+    - match goal with Hi : inflight_related _ _ |- _ =>
+        destruct (inflight_phase _ _ Hi) as [req Hw]; cbn in Hw; rewrite Hph in Hw; discriminate end.
+  Qed.
 
   Lemma retire_mul : forall s l m Q x dmd inst,
       related (s, l) m -> run1_step m Q -> s.(semantics.Phase) = StepInstr inst ->
@@ -954,21 +1156,6 @@ Section Connection.
        exists req, (mstep dmd s x).(semantics.Phase) = StepWaitMMIOResp req /\
                    (mstep dmd s x).(semantics.MMIOReqBuffer) <> []).
   Proof. (* ADMIT: misaligned access (no_misaligned_access) and MMIO wait phases *) Admitted.
-
-  Local Opaque Decode.decode.
-  (* reduce [run1_step] to the fetch and the rest of the instruction; [decode]
-     stays folded until the fetched word is known *)
-  Local Ltac reduce_run1 H :=
-    unfold run1_step, run1 in H;
-    cbv [mcomp_sat PP MetricMinimalMMIOPrimitivesParams] in H;
-    cbn [Bind free.Monad_free free.bind free.interp free.interp_fix free.interp_body
-         interp_action interpret_action
-         Spec.Machine.getPC Spec.Machine.loadWord Spec.Machine.leakEvent Spec.Machine.RVP
-         Spec.Machine.getRegister Spec.Machine.setRegister Spec.Machine.setPC
-         Spec.Machine.endCycleNormal Spec.Machine.getPrivMode Spec.Machine.getCSRField
-         MetricMaterializeWithLeakage MetricMaterialize fst snd
-         getMachine getMetrics getRegs getPc getNextPc getMem getXAddrs getLog getTrace
-         RiscvMachine.withLeakageEvent] in H.
 
   Lemma retire_csr_or_invalid : forall s l m Q inst,
       related (s, l) m -> run1_step m Q -> s.(semantics.Phase) = StepInstr inst ->
