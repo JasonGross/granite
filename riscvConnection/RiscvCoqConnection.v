@@ -918,11 +918,59 @@ Section Connection.
                    (mstep dmd s x).(semantics.MMIOReqBuffer) <> []).
   Proof. (* ADMIT: misaligned access (no_misaligned_access) and MMIO wait phases *) Admitted.
 
+  Local Opaque Decode.decode.
+  (* reduce [run1_step] to the fetch and the rest of the instruction; [decode]
+     stays folded until the fetched word is known *)
+  Local Ltac reduce_run1 H :=
+    unfold run1_step, run1 in H;
+    cbv [mcomp_sat PP MetricMinimalMMIOPrimitivesParams] in H;
+    cbn [Bind free.Monad_free free.bind free.interp free.interp_fix free.interp_body
+         interp_action interpret_action
+         Spec.Machine.getPC Spec.Machine.loadWord Spec.Machine.leakEvent Spec.Machine.RVP
+         Spec.Machine.getRegister Spec.Machine.setRegister Spec.Machine.setPC
+         Spec.Machine.endCycleNormal Spec.Machine.getPrivMode Spec.Machine.getCSRField
+         MetricMaterializeWithLeakage MetricMaterialize fst snd
+         getMachine getMetrics getRegs getPc getNextPc getMem getXAddrs getLog getTrace
+         RiscvMachine.withLeakageEvent] in H.
+
   Lemma retire_csr_or_invalid : forall s l m Q inst,
       related (s, l) m -> run1_step m Q -> s.(semantics.Phase) = StepInstr inst ->
       (match inst with instrs.Strt (instrs.Csrrw _ _ _) | instrs.InvalidInstr _ => True | _ => False end) ->
       False.
-  Proof. (* ADMIT: CSR/trap semantics; on this platform run1_step m Q is False for these, via csr_primitives_stuck and isa_coverage *) Admitted.
+  Proof.
+    intros s l m Q inst HR HQ Hph Hcls.
+    inversion HR; subst; cbn in *.
+    - match goal with Hd : _ \/ _ |- _ => destruct Hd as [Hd | Hd]; rewrite Hph in Hd; discriminate end.
+    - match goal with HP : semantics.Phase s = StepInstr _ |- _ => rewrite Hph in HP; inversion HP; subst inst end.
+      match goal with Hc : core_related s l m |- _ =>
+      destruct m as [[regs pc npc mem xaddrs log trace] metrics];
+      reduce_run1 HQ;
+      destruct HQ as [HX HQ]; specialize (HX eq_refl);
+      pose proof (fetch_related s l _ Hc HX) as HF; cbn [getMachine getMem getPc] in HF;
+      unfold Memory.loadWord in HF; rewrite HF in HQ;
+      set (w := baseMem.LoadWord (semantics.Pc (semantics.ArchSt s)) (semantics.Imem (semantics.ArchSt s))) in *;
+      destruct (instrs.Decode.decode w) as [si | ci | mi | w'] eqn:Egi;
+      [ destruct si; try (exfalso; exact Hcls) | exfalso; exact Hcls | exfalso; exact Hcls | ]
+      end.
+      + (* csrrw: on this platform reading the privilege mode is impossible *)
+        assert (Hdec : granite_decodes w) by (unfold granite_decodes; rewrite Egi; exact I).
+        pose proof (decode_agree w Hdec) as HD. rewrite Egi in HD. cbn [to_riscv] in HD.
+        rewrite <- HD in HQ.
+        cbn [LeakageOfInstr.leakage_of_instr LeakageOfInstr.instr_leakage Return free.Monad_free
+             free.bind free.interp_fix free.interp_body interp_action interpret_action
+             Execute.execute ExecuteCSR.execute ExecuteCSR.checkPermissions
+             Spec.Machine.getPrivMode Spec.Machine.leakEvent Spec.Machine.RVP
+             MetricMaterializeWithLeakage MetricMaterialize fst snd option_map
+             getMachine getMetrics RiscvMachine.withLeakageEvent] in HQ.
+        exact HQ.
+      + (* an instruction granite does not implement: excluded by isa_coverage *)
+        pose proof (isa_coverage (s, l) _ w HR) as HC. cbn [getMachine getMem getPc] in HC.
+        unfold Memory.loadWord in HC. specialize (HC HF).
+        unfold granite_decodes in HC. rewrite Egi in HC. exact HC.
+    - match goal with Hi : inflight_related _ _ |- _ =>
+        destruct (inflight_phase _ _ Hi) as [req Hw]; cbn in Hw; rewrite Hph in Hw; discriminate end.
+  Qed.
+
 
   Lemma mretire : forall s l m Q x dmd inst,
       related (s, l) m -> run1_step m Q -> s.(semantics.Phase) = StepInstr inst ->
