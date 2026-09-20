@@ -43,6 +43,7 @@ From riscv Require Import Utility.Utility Utility.Monads Spec.Decode
   Platform.MetricLogging Platform.MaterializeRiscvProgram
   Platform.MetricMaterializeRiscvProgram Platform.MinimalMMIO Platform.MetricMinimalMMIO.
 From riscv Require Spec.Machine.
+From RecordUpdate Require Import RecordSet. Import RecordSetNotations.
 From granite.core Require Import Bits.
 From granite.isaSpec Require Import Common IFC Memory RegisterFile Riscv Spec.
 From granite.isaSpec Require Machine.
@@ -225,12 +226,17 @@ Section Connection.
 
   (* Which per-cycle inputs the theorems quantify over.  RESTRICTIONS (not
      discrepancies): riscv-coq has no interrupts, so no input asserts one; and
-     one cycle executes at most one driver micro-step, so that a cycle retires
-     at most one instruction (a driver list of length 3 would retire a whole
-     instruction, of length 6 two; the one-step [core] shape needs at most one). *)
+     one cycle executes at most three driver micro-steps.  Three is what
+     granite's own driver uses to retire exactly one instruction per cycle
+     ([None; None; None] in Spec.v's and TestSpec.v's examples: leak, execute,
+     interrupt poll), and the phase cycle StepLeak -> StepInstr ->
+     StepInterrupt -> StepLeak means that at most one instruction retires in
+     three micro-steps, which is what the one-step [core] shape needs.
+     Whether arbitrary driver lists must be supported (a multi-step [core]
+     with a list of riscv-coq steps) is a question for the PR. *)
   Definition admissible (i : GInput) : Prop :=
     (fst (fst i)).(PubInput_interruptValid) = false /\
-    (length (snd i).(DriverOut_nSteps) <= 1)%nat.
+    (length (snd i).(DriverOut_nSteps) <= 3)%nat.
 
   (* fair inputs, for [eventually]: the driver schedules a micro-step and the
      MMIO handshake is ready and valid, so that granite cannot stutter forever *)
@@ -286,9 +292,18 @@ Section Connection.
      of riscv-coq's ([LeakageOfInstr]); granite's [mul] additionally leaks
      whether an operand is zero.  Stated abstractly until aligned. *)
   Context (leak_related : IFC.L_leakage -> option (list LeakageOfInstr.LeakageEvent) -> Prop).
-  (* the leakage granite has produced so far is not in [St] either; it is a
-     function of the execution, abstracted here *)
-  Context (granite_leaks : GState -> IFC.L_leakage).
+  (* the leakage granite has produced so far is not in [St] either.  Until the
+     leakage alignment is done it is modelled as an abstract function of the
+     architectural core of the state (phase, architectural state, MMIO
+     buffers, interrupt latch), so that the cycle bookkeeping (default
+     machine, wires, log) does not disturb it. *)
+  Definition core_of (s : GSt) :=
+    (s.(semantics.Phase), s.(semantics.ArchSt), s.(semantics.MMIOReqBuffer),
+     s.(semantics.MMIORespBuffer), s.(semantics.InterruptSt)).
+  Context (granite_leaks_core : StepPhase instrs.Instr (specMemory.memReqEvent * option Register)
+                                * semantics.ArchState * list specMemory.memReqEvent
+                                * list mem_resp_t * option mword -> IFC.L_leakage).
+  Definition granite_leaks (g : GState) : IFC.L_leakage := granite_leaks_core (core_of (fst g)).
 
   (* in-flight states: granite between the micro-steps of one instruction
      ([StepInstr], [StepWaitMMIOResp], [StepInterrupt] phases), related to the
@@ -544,125 +559,289 @@ Section Connection.
      instruction ([execStrt]/[execCtrl]/[execMem] of [Spec.v] against
      [ExecuteI]/[ExecuteM] unfolded through the platform), the MMIO wait
      sequence, and the phase bookkeeping. *)
-  (** *** The pieces of one cycle *)
+  (** *** One cycle, decomposed *)
 
-  (* one driver micro-step from a granite state, [Spec.v:572-611] *)
-  Local Notation micro s x := (fst (semantics.doDriverStep s x)).
+  (* the cycle prologue: latch the interrupt input, then the MMIO handshake
+     ([Spec.v], [specStep]) *)
+  Definition prologue (s : GSt) (i : GInput) : GSt :=
+    let pub := fst (fst i) in
+    let sec := snd (fst i) in
+    semantics.consumeMMIOReq
+      (semantics.consumeMMIOResp
+         (s <| semantics.InterruptSt :=
+                 if pub.(PubInput_interruptValid) then Some pub.(PubInput_interruptSrc) else None |>)
+         pub.(PubInput_mmio).(PubHandshake_valid) sec.(SecInput_mmioData))
+      pub.(PubInput_mmio).(PubHandshake_ready).
 
-  (* No micro-step: only the interrupt latch, the handshake and the default
-     machine move.  In idle phases the wires are idle, so nothing is consumed
-     and no MMIO event is logged; the relation ignores the default machine. *)
-  Lemma stutter_empty : forall g m i,
-      related g m -> admissible i -> (snd i).(DriverOut_nSteps) = [] ->
-      related (next g i) m.
-  Proof. (* ADMIT: MMIO wait phases (in-flight handshake bookkeeping); the idle case is routine *) Admitted.
+  (* one driver micro-step followed by the wire update, as [doDriverSteps] does *)
+  Definition mstep (dmd : mem_req_t) (s : GSt) (x : option unit) : GSt :=
+    semantics.update_mmio (fst (semantics.doDriverStep s x)) dmd.
+  Definition msteps (dmd : mem_req_t) (xs : list (option unit)) (s : GSt) : GSt :=
+    fold_left (mstep dmd) xs s.
 
-  (* [StepInterrupt] with no interrupt pending: the phase goes back to
-     [StepLeak], nothing else changes (Spec.v:583-591 with [None]). *)
-  Lemma stutter_interrupt : forall g m i x,
-      related g m -> admissible i -> (snd i).(DriverOut_nSteps) = [x] ->
-      (fst g).(semantics.Phase) = StepInterrupt ->
-      related (next g i) m.
-  Proof. (* ADMIT: interrupts (the [InterruptSt = None] invariant is what admissible_no_interrupt buys) *) Admitted.
+  (* the default machine's contribution to the cycle: its next state and the
+     MMIO data it drives when granite has none *)
+  Definition nd_of (g : GState) (i : GInput) : Machine.state defaultMachine :=
+    fst (Machine.step defaultMachine (fst g).(semantics.DefaultMachine) (fst i)).
+  Definition dmd_of (g : GState) (i : GInput) : mem_req_t :=
+    (snd (snd (Machine.step defaultMachine (fst g).(semantics.DefaultMachine) (fst i)))).(SecOutput_mmioData).
+
+  Lemma doDriverSteps_fst : forall xs s l dmd,
+      fst (fold_left (fun '(st, leakage) step =>
+                        let '(st', leak') := semantics.doDriverStep st step in
+                        (semantics.update_mmio st' dmd, leakage ++ leak')) xs (s, l))
+      = msteps dmd xs s.
+  Proof.
+    unfold msteps. induction xs as [| x xs IH]; intros s l dmd; cbn; [reflexivity |].
+    destruct (semantics.doDriverStep s x) as [s' leak'] eqn:E.
+    rewrite IH. change (mstep dmd s x) with (semantics.update_mmio (fst (semantics.doDriverStep s x)) dmd).
+    rewrite E. reflexivity.
+  Qed.
+
+  Lemma next_unfold : forall g i,
+      fst (next g i) =
+        (semantics.update_mmio (msteps (dmd_of g i) (snd i).(DriverOut_nSteps) (prologue (fst g) i)) (dmd_of g i))
+          <| semantics.DefaultMachine := nd_of g i |>.
+  Proof.
+    intros [s l] [[pub sec] drv]. unfold next, nd_of, dmd_of, prologue. cbn [fst snd Machine.step semantics.machine].
+    unfold semantics.specStep, semantics.step'.
+    destruct (Machine.step defaultMachine (semantics.DefaultMachine s) (pub, sec)) as [nd [dpub dsec]] eqn:E.
+    cbn [fst snd].
+    unfold semantics.doDriverSteps.
+    match goal with
+    | |- context [fold_left ?f ?xs ?init] =>
+        destruct (fold_left f xs init) as [s2 leak] eqn:E2;
+        pose proof (f_equal fst E2) as H; rewrite doDriverSteps_fst in H; cbn [fst] in H
+    end.
+    rewrite <- H. reflexivity.
+  Qed.
+
+  (** *** What the in-flight relation must satisfy (properties of the parameter) *)
+
+  (* an in-flight state is in [StepInstr] or [StepWaitMMIOResp] *)
+  Hypothesis inflight_phase : forall g m, inflight_related g m ->
+      (exists inst, (fst g).(semantics.Phase) = StepInstr inst) \/
+      (exists req, (fst g).(semantics.Phase) = StepWaitMMIOResp req).
+  (* it ignores the default machine and the wires *)
+  Hypothesis inflight_set_default : forall s l m nd,
+      inflight_related (s, l) m -> inflight_related (s <| semantics.DefaultMachine := nd |>, l) m.
+  Hypothesis inflight_update_mmio : forall s l m dmd,
+      inflight_related (s, l) m -> inflight_related (semantics.update_mmio s dmd, l) m.
+  (* ADMIT-HYP: MMIO wait phases.  The handshake in the prologue moves a request
+     out of, or a response into, the buffers of a waiting state; the in-flight
+     relation must absorb that together with the logged event. *)
+  Hypothesis inflight_prologue : forall s l m i,
+      inflight_related (s, l) m -> admissible i ->
+      inflight_related (prologue s i, cycle_mmio s i ++ l) m.
+
+  (** *** The relation across the cycle bookkeeping *)
+
+  Lemma related_phase : forall g m, related g m ->
+      (fst g).(semantics.Phase) = StepLeak \/ (fst g).(semantics.Phase) = StepInterrupt \/
+      (exists inst, (fst g).(semantics.Phase) = StepInstr inst) \/
+      (exists req, (fst g).(semantics.Phase) = StepWaitMMIOResp req).
+  Proof.
+    intros g m H. inversion H; subst.
+    - destruct H0; auto.
+    - destruct (inflight_phase _ _ H0); auto.
+  Qed.
+
+  Lemma related_set_default : forall s l m nd,
+      related (s, l) m -> related (s <| semantics.DefaultMachine := nd |>, l) m.
+  Proof.
+    intros s l m nd H. inversion H; subst.
+    - apply related_idle; unfold RecordSet.set, granite_leaks, core_of in *; cbn in *; assumption.
+    - apply related_inflight. apply inflight_set_default. assumption.
+  Qed.
+
+  Lemma related_update_mmio : forall s l m dmd,
+      related (s, l) m -> related (semantics.update_mmio s dmd, l) m.
+  Proof.
+    intros s l m dmd H. inversion H; subst.
+    - unfold semantics.update_mmio, RecordSet.set, granite_leaks, core_of in *. cbn in *.
+      destruct H0 as [H0 | H0]; rewrite H0 in *; cbn; apply related_idle;
+        unfold granite_leaks, core_of in *; cbn in *; auto.
+    - apply related_inflight. apply inflight_update_mmio. assumption.
+  Qed.
+
+  (* in idle phases the wires are idle, so the handshake consumes nothing and
+     logs nothing; the interrupt latch stays [None] for admissible inputs *)
+  Lemma related_prologue : forall s l m i,
+      related (s, l) m -> admissible i -> related (prologue s i, cycle_mmio s i ++ l) m.
+  Proof.
+    intros s l m i H [Hint Hlen]. inversion H; subst.
+    - unfold prologue, cycle_mmio, RecordSet.set, semantics.consumeMMIOResp, semantics.consumeMMIOReq,
+        granite_leaks, core_of in *. cbn in *.
+      rewrite H1, Hint in *. cbn.
+      match goal with HI : semantics.InterruptSt s = None |- _ => rewrite HI in * end.
+      apply related_idle; unfold granite_leaks, core_of in *; cbn in *; auto.
+    - apply related_inflight. apply inflight_prologue; [assumption | split; assumption].
+  Qed.
+
+  (** *** The micro-steps *)
+
+  (* [StepInterrupt] with no interrupt pending: back to [StepLeak], nothing
+     else changes (Spec.v, [doDriverStep] with [InterruptSt = None]) *)
+  Lemma mstutter_interrupt : forall s l m x dmd,
+      related (s, l) m -> s.(semantics.Phase) = StepInterrupt ->
+      related (mstep dmd s x, l) m /\ (mstep dmd s x).(semantics.Phase) = StepLeak.
+  Proof. (* ADMIT: interrupts (the [InterruptSt = None] invariant) *) Admitted.
 
   (* [StepLeak]: fetch from [Imem], decode, emit the leakage event, move to
      [StepInstr]; riscv-coq has not stepped yet, so this is a stutter into an
-     in-flight state whose leakage is one event ahead of [getTrace]. *)
-  Lemma stutter_leak : forall g m i x,
-      related g m -> admissible i -> (snd i).(DriverOut_nSteps) = [x] ->
-      (fst g).(semantics.Phase) = StepLeak ->
-      related (next g i) m.
+     in-flight state whose leakage is one event ahead of [getTrace] *)
+  Lemma mstutter_leak : forall s l m x dmd,
+      related (s, l) m -> s.(semantics.Phase) = StepLeak ->
+      related (mstep dmd s x, l) m /\ exists inst, (mstep dmd s x).(semantics.Phase) = StepInstr inst.
   Proof. (* ADMIT: leakage alignment (granite's event vs riscv-coq's fetchInstr/executeInstr pair) *) Admitted.
 
-  (* [StepInstr]: the retiring cycle.  One lemma per instruction class; each
-     unfolds [run1_step] through the free-monad interpreter for that
+  (* [StepInstr]: the retiring micro-step.  One lemma per instruction class;
+     each unfolds [run1_step] through the free-monad interpreter for that
      instruction ([decode_agree] identifies the decoded instruction) and
      granite's [execStrt]/[execCtrl]/[execMem]. *)
-  Definition retires (g : GState) (m : MetricRiscvMachine) (Q : MetricRiscvMachine -> Prop) (i : GInput) : Prop :=
-    exists m', related (next g i) m' /\ Q m'.
+  Definition retired (s : GSt) (l : list MMIOEvent) (Q : MetricRiscvMachine -> Prop) : Prop :=
+    exists m', related (s, l) m' /\ Q m' /\ s.(semantics.Phase) = StepInterrupt.
 
-  Lemma retire_alu : forall g m Q i x inst,
-      related g m -> run1_step m Q -> admissible i -> (snd i).(DriverOut_nSteps) = [x] ->
-      (fst g).(semantics.Phase) = StepInstr inst ->
+  Lemma retire_alu : forall s l m Q x dmd inst,
+      related (s, l) m -> run1_step m Q -> s.(semantics.Phase) = StepInstr inst ->
       (match inst with
        | instrs.Strt (instrs.Addi _ _ _) | instrs.Strt (instrs.Add _ _ _) | instrs.Strt (instrs.Xor _ _ _)
        | instrs.Strt (instrs.Slli _ _ _) | instrs.Strt (instrs.Srli _ _ _)
        | instrs.Strt (instrs.Lui _ _) | instrs.Strt (instrs.Auipc _ _) => True
        | _ => False end) ->
-      retires g m Q i.
+      retired (mstep dmd s x) l Q.
   Proof. (* ADMIT: not a discrepancy; ALU class unfinished (see report) *) Admitted.
 
-  Lemma retire_mul : forall g m Q i x inst,
-      related g m -> run1_step m Q -> admissible i -> (snd i).(DriverOut_nSteps) = [x] ->
-      (fst g).(semantics.Phase) = StepInstr inst ->
+  Lemma retire_mul : forall s l m Q x dmd inst,
+      related (s, l) m -> run1_step m Q -> s.(semantics.Phase) = StepInstr inst ->
       (match inst with instrs.Strt (instrs.Mul _ _ _) => True | _ => False end) ->
-      retires g m Q i.
+      retired (mstep dmd s x) l Q.
   Proof. (* ADMIT: leakage alignment (granite's mul leaks the zero-operand bit) *) Admitted.
 
-  Lemma retire_ctrl : forall g m Q i x inst,
-      related g m -> run1_step m Q -> admissible i -> (snd i).(DriverOut_nSteps) = [x] ->
-      (fst g).(semantics.Phase) = StepInstr inst ->
+  Lemma retire_ctrl : forall s l m Q x dmd inst,
+      related (s, l) m -> run1_step m Q -> s.(semantics.Phase) = StepInstr inst ->
       (match inst with instrs.Ctrl _ => True | _ => False end) ->
-      retires g m Q i.
+      retired (mstep dmd s x) l Q.
   Proof. (* ADMIT: not a discrepancy; branch/jalr class unfinished; the misaligned-target trap is excluded by the platform *) Admitted.
 
-  Lemma retire_mem : forall g m Q i x inst,
-      related g m -> run1_step m Q -> admissible i -> (snd i).(DriverOut_nSteps) = [x] ->
-      (fst g).(semantics.Phase) = StepInstr inst ->
+  (* memory: a non-MMIO access retires; an MMIO access issues its request and
+     waits, with the request in the buffer *)
+  Lemma retire_mem : forall s l m Q x dmd inst,
+      related (s, l) m -> run1_step m Q -> s.(semantics.Phase) = StepInstr inst ->
       (match inst with instrs.Mem _ => True | _ => False end) ->
-      retires g m Q i \/ related (next g i) m.   (* MMIO: request issued, retire later *)
+      retired (mstep dmd s x) l Q \/
+      (related (mstep dmd s x, l) m /\
+       exists req, (mstep dmd s x).(semantics.Phase) = StepWaitMMIOResp req /\
+                   (mstep dmd s x).(semantics.MMIOReqBuffer) <> []).
   Proof. (* ADMIT: misaligned access (no_misaligned_access) and MMIO wait phases *) Admitted.
 
-  Lemma retire_csr_or_invalid : forall g m Q i x inst,
-      related g m -> run1_step m Q -> admissible i -> (snd i).(DriverOut_nSteps) = [x] ->
-      (fst g).(semantics.Phase) = StepInstr inst ->
+  Lemma retire_csr_or_invalid : forall s l m Q inst,
+      related (s, l) m -> run1_step m Q -> s.(semantics.Phase) = StepInstr inst ->
       (match inst with instrs.Strt (instrs.Csrrw _ _ _) | instrs.InvalidInstr _ => True | _ => False end) ->
       False.
   Proof. (* ADMIT: CSR/trap semantics; on this platform run1_step m Q is False for these, via csr_primitives_stuck and isa_coverage *) Admitted.
 
-  (* [StepWaitMMIOResp]: retire when a response is buffered, else stutter *)
-  Lemma mmio_wait : forall g m Q i x req,
-      related g m -> run1_step m Q -> admissible i -> (snd i).(DriverOut_nSteps) = [x] ->
-      (fst g).(semantics.Phase) = StepWaitMMIOResp req ->
-      retires g m Q i \/ related (next g i) m.
+  Lemma mretire : forall s l m Q x dmd inst,
+      related (s, l) m -> run1_step m Q -> s.(semantics.Phase) = StepInstr inst ->
+      retired (mstep dmd s x) l Q \/
+      (related (mstep dmd s x, l) m /\
+       exists req, (mstep dmd s x).(semantics.Phase) = StepWaitMMIOResp req /\
+                   (mstep dmd s x).(semantics.MMIOReqBuffer) <> []).
+  Proof.
+    intros s l m Q x dmd inst HR HQ Hph.
+    destruct inst as [si | ci | mi | w'].
+    - destruct si;
+        first [ left; exact (retire_alu s l m Q x dmd _ HR HQ Hph I)
+              | left; exact (retire_mul s l m Q x dmd _ HR HQ Hph I)
+              | exfalso; exact (retire_csr_or_invalid s l m Q _ HR HQ Hph I) ].
+    - left. exact (retire_ctrl s l m Q x dmd _ HR HQ Hph I).
+    - exact (retire_mem s l m Q x dmd _ HR HQ Hph I).
+    - exfalso. exact (retire_csr_or_invalid s l m Q _ HR HQ Hph I).
+  Qed.
+
+  (* [StepWaitMMIOResp]: retire when a response is buffered, else stutter in place *)
+  Lemma mwait : forall s l m Q x dmd req,
+      related (s, l) m -> run1_step m Q -> s.(semantics.Phase) = StepWaitMMIOResp req ->
+      retired (mstep dmd s x) l Q \/
+      (related (mstep dmd s x, l) m /\ (mstep dmd s x).(semantics.Phase) = StepWaitMMIOResp req).
   Proof. (* ADMIT: MMIO wait phases *) Admitted.
 
-  (* the measure: cycles until the next retirement on fair inputs *)
-  Hypothesis measure_stutter : forall g m i,
-      related g m -> fair i -> related (next g i) m -> ~ retires g m (fun _ => True) i ->
-      measure (next g i) < measure g.
+  (* one micro-step from any related state: retire (into [StepInterrupt]) or stutter *)
+  Lemma mstep_sim : forall s l m Q x dmd,
+      related (s, l) m -> run1_step m Q ->
+      retired (mstep dmd s x) l Q \/ related (mstep dmd s x, l) m.
+  Proof.
+    intros s l m Q x dmd HR HQ.
+    destruct (related_phase _ _ HR) as [Hph | [Hph | [[inst Hph] | [req Hph]]]].
+    - right. apply (mstutter_leak s l m x dmd HR Hph).
+    - right. apply (mstutter_interrupt s l m x dmd HR Hph).
+    - destruct (mretire s l m Q x dmd inst HR HQ Hph) as [H | [H _]]; auto.
+    - destruct (mwait s l m Q x dmd req HR HQ Hph) as [H | [H _]]; auto.
+  Qed.
+
+  (* after a retirement the next two micro-steps stutter (StepInterrupt, then StepLeak) *)
+  Lemma msteps_after_retire : forall xs s l m2 dmd,
+      (length xs <= 2)%nat ->
+      related (s, l) m2 -> s.(semantics.Phase) = StepInterrupt ->
+      related (msteps dmd xs s, l) m2.
+  Proof.
+    intros xs s l m2 dmd Hlen HR Hph.
+    destruct xs as [| a [| b [| c rest]]]; cbn in Hlen; try lia; unfold msteps; cbn.
+    - exact HR.
+    - apply (mstutter_interrupt s l m2 a dmd HR Hph).
+    - destruct (mstutter_interrupt s l m2 a dmd HR Hph) as [HR1 Hph1].
+      apply (mstutter_leak _ l m2 b dmd HR1 Hph1).
+  Qed.
+
+  (* at most three micro-steps from a related state: one retirement or none *)
+  Lemma msteps_sim : forall xs s l m Q dmd,
+      (length xs <= 3)%nat ->
+      related (s, l) m -> run1_step m Q ->
+      (exists m2, related (msteps dmd xs s, l) m2 /\ Q m2) \/ related (msteps dmd xs s, l) m.
+  Proof.
+    intros xs s l m Q dmd Hlen HR HQ.
+    destruct xs as [| a [| b [| c [| d rest]]]]; cbn in Hlen; try lia.
+    - right. exact HR.
+    - destruct (mstep_sim s l m Q a dmd HR HQ) as [[m2 [HR2 [HQ2 _]]] | HR2].
+      + left. eauto.
+      + right. exact HR2.
+    - destruct (mstep_sim s l m Q a dmd HR HQ) as [[m2 [HR2 [HQ2 Hph2]]] | HR2].
+      + left. exists m2. split; [| exact HQ2].
+        exact (msteps_after_retire [b] _ l m2 dmd ltac:(cbn; lia) HR2 Hph2).
+      + destruct (mstep_sim _ l m Q b dmd HR2 HQ) as [[m2 [HR3 [HQ3 _]]] | HR3].
+        * left. eauto.
+        * right. exact HR3.
+    - destruct (mstep_sim s l m Q a dmd HR HQ) as [[m2 [HR2 [HQ2 Hph2]]] | HR2].
+      + left. exists m2. split; [| exact HQ2].
+        exact (msteps_after_retire [b; c] _ l m2 dmd ltac:(cbn; lia) HR2 Hph2).
+      + destruct (mstep_sim _ l m Q b dmd HR2 HQ) as [[m2 [HR3 [HQ3 Hph3]]] | HR3].
+        * left. exists m2. split; [| exact HQ3].
+          exact (msteps_after_retire [c] _ l m2 dmd ltac:(cbn; lia) HR3 Hph3).
+        * destruct (mstep_sim _ l m Q c dmd HR3 HQ) as [[m2 [HR4 [HQ4 _]]] | HR4].
+          { left. eauto. }
+          { right. exact HR4. }
+  Qed.
 
   Lemma cycle_sim_i : forall g m Q i,
       related g m -> run1_step m Q -> admissible i ->
-      (exists m', related (next g i) m' /\ Q m') \/
+      (exists m2, related (next g i) m2 /\ Q m2) \/
       (related (next g i) m /\ (fair i -> measure (next g i) < measure g)).
   Proof.
     intros g m Q i HR HQ Hi.
-    (* dispatch on the driver list (length <= 1) and the phase *)
-    destruct (snd i).(DriverOut_nSteps) as [| x [| y rest]] eqn:Hn.
-    - right. split. { exact (stutter_empty g m i HR Hi Hn). }
-      intros [_ [Hne _]]. congruence.
-    - destruct (fst g).(semantics.Phase) as [| inst | req | ] eqn:Hph.
-      + (* StepLeak *) right. split. { exact (stutter_leak g m i x HR Hi Hn Hph). }
-        (* ADMIT: progress measure for fair inputs *) admit.
-      + (* StepInstr *)
-        destruct inst as [si | ci | mi | w'].
-        * destruct si;
-            first [ left; exact (retire_alu g m Q i x _ HR HQ Hi Hn Hph I)
-                  | left; exact (retire_mul g m Q i x _ HR HQ Hi Hn Hph I)
-                  | exfalso; exact (retire_csr_or_invalid g m Q i x _ HR HQ Hi Hn Hph I) ].
-        * left. exact (retire_ctrl g m Q i x _ HR HQ Hi Hn Hph I).
-        * destruct (retire_mem g m Q i x _ HR HQ Hi Hn Hph I) as [H | H].
-          { left. exact H. }
-          { right. split. { exact H. } (* ADMIT: progress measure for fair inputs *) admit. }
-        * exfalso. exact (retire_csr_or_invalid g m Q i x _ HR HQ Hi Hn Hph I).
-      + (* StepWaitMMIOResp *)
-        destruct (mmio_wait g m Q i x req HR HQ Hi Hn Hph) as [H | H].
-        { left. exact H. }
-        { right. split. { exact H. } (* ADMIT: progress measure for fair inputs *) admit. }
-      + (* StepInterrupt *) right. split. { exact (stutter_interrupt g m i x HR Hi Hn Hph). }
-        (* ADMIT: progress measure for fair inputs *) admit.
-    - exfalso. destruct Hi as [_ Hlen]. rewrite Hn in Hlen. cbn in Hlen. lia.
+    assert (Hnext : next g i =
+      ((semantics.update_mmio (msteps (dmd_of g i) (snd i).(DriverOut_nSteps) (prologue (fst g) i)) (dmd_of g i))
+         <| semantics.DefaultMachine := nd_of g i |>, cycle_mmio (fst g) i ++ snd g)).
+    { rewrite <- next_unfold. unfold next at 2. reflexivity. }
+    rewrite Hnext.
+    destruct g as [s l]. cbn [fst snd] in *.
+    pose proof (related_prologue s l m i HR Hi) as HRp.
+    destruct Hi as [_ Hlen].
+    destruct (msteps_sim _ _ _ m Q (dmd_of (s, l) i) Hlen HRp HQ) as [[m2 [HR2 HQ2]] | HR2].
+    - left. exists m2. split; [| exact HQ2].
+      apply related_set_default. apply related_update_mmio. exact HR2.
+    - right. split.
+      + apply related_set_default. apply related_update_mmio. exact HR2.
+      + (* ADMIT: progress measure for fair inputs *) admit.
   Admitted.
 
   (* the two forms the generic section consumes *)
