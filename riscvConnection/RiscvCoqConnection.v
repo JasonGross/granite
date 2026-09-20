@@ -34,7 +34,7 @@
 
 From Stdlib Require Import ZArith Lists.List Strings.String Wf_nat Lia Btauto.
 Import ListNotations.
-From coqutil Require Import Map.Interface Word.Bitwidth Byte Z.BitOps Z.bitblast.
+From coqutil Require Import Map.Interface Word.Bitwidth Byte Z.BitOps Z.bitblast Map.Memory Word.LittleEndianList Datatypes.List.
 From coqutil Require Semantics.OmniSmallstepCombinators.
 From riscv Require Import Utility.Utility Utility.Monads Spec.Decode
   Spec.Primitives Spec.LeakageOfInstr Platform.RiscvMachine
@@ -43,6 +43,7 @@ From riscv Require Import Utility.Utility Utility.Monads Spec.Decode
   Platform.MetricLogging Platform.MaterializeRiscvProgram
   Platform.MetricMaterializeRiscvProgram Platform.MinimalMMIO Platform.MetricMinimalMMIO.
 From riscv Require Spec.Machine.
+From stdpp Require Import list_numbers.
 From RecordUpdate Require Import RecordSet. Import RecordSetNotations.
 From granite.core Require Import Bits.
 From granite.isaSpec Require Import Common IFC Memory RegisterFile Riscv Spec.
@@ -267,6 +268,7 @@ Section Connection.
 
   (* granite bytes are [bits 8]; riscv-coq bytes are [coqutil.Byte.byte] *)
   Definition to_byte (b : Common.Byte) : byte := byte.of_Z (Zmod.unsigned b).
+  Local Arguments to_byte : simpl never.
 
   Definition regs_related (rf : registerFile.RegFile) (rr : Registers) : Prop :=
     forall i : Z, (0 < i < 32)%Z ->
@@ -282,7 +284,9 @@ Section Connection.
     (forall a, ~ isMMIOAddr_g a -> map.get m a = Some (to_byte (baseMem.load_byte (to_N a) dmem))) /\
     (forall a, isMMIOAddr_g a -> map.get m a = None) /\
     (forall a, In a xaddrs -> baseMem.load_byte (to_N a) dmem = baseMem.load_byte (to_N a) imem) /\
-    (forall a, In a xaddrs -> ~ isMMIOAddr_g a).
+    (forall a, In a xaddrs -> ~ isMMIOAddr_g a) /\
+    (* granite addresses memory by [N] without wrap-around *)
+    (forall a, In a xaddrs -> (Zmod.unsigned a + 4 <= 2 ^ 32)%Z).
 
   (* the abstracted granite log is the abstraction of riscv-coq's [getLog]
      (bedrock2's [mmio_trace_abstraction_relation], stated here abstractly) *)
@@ -773,6 +777,88 @@ Section Connection.
         | rewrite (granite_leaks_prologue _ l) by (try assumption; apply Hc); assumption ]
       end.
     - apply related_wait. apply inflight_prologue; assumption.
+  Qed.
+
+  (** *** Fetch: the word riscv-coq loads at [pc] is the word granite fetches *)
+
+  Lemma to_byte_unsigned : forall b : Common.Byte, byte.unsigned (to_byte b) = Zmod.unsigned b.
+  Proof.
+    intros. unfold to_byte. rewrite byte.unsigned_of_Z. unfold byte.wrap.
+    apply Z.mod_small. apply bits.unsigned_range. lia.
+  Qed.
+
+  (* coqutil's little-endian combine of the converted bytes is granite's *)
+  Lemma le_combine_granite : forall bs : list Common.Byte,
+      LittleEndianList.le_combine (List.map to_byte bs) = little_endian_to_bits 8 bs.
+  Proof.
+    induction bs as [| b bs IH]; [reflexivity |].
+    unfold little_endian_to_bits in *.
+    change (LittleEndianList.le_combine (List.map to_byte (b :: bs)))
+      with (Z.lor (byte.unsigned (to_byte b)) (Z.shiftl (LittleEndianList.le_combine (List.map to_byte bs)) 8)).
+    change (little_endian_to_Z 8 (List.map Zmod.unsigned (b :: bs)))
+      with (Z.lor (Zmod.unsigned b) (Z.shiftl (little_endian_to_Z 8 (List.map Zmod.unsigned bs)) 8)).
+    rewrite to_byte_unsigned, IH. reflexivity.
+  Qed.
+
+  (* [lia] does not evaluate [2 ^ 32] *)
+  Local Ltac pow32 := change (2 ^ 32)%Z with 4294967296%Z in *.
+
+  (* granite addresses memory by [N] without wrap-around; within an executable
+     word the two address arithmetics agree *)
+  Lemma to_N_add_small : forall (a : word) (k : Z),
+      (0 <= k)%Z -> (Zmod.unsigned a + k < 2 ^ 32)%Z ->
+      to_N (Zmod.add a (bits.of_Z 32 k)) = (to_N a + Z.to_N k)%N.
+  Proof.
+    intros a k Hk Hlt. unfold to_N.
+    pose proof (bits.unsigned_range a ltac:(lia)).
+    rewrite Zmod.unsigned_add, bits.unsigned_of_Z_small by (pow32; lia).
+    pow32. rewrite Z.mod_small by lia. lia.
+  Qed.
+
+  Lemma fetch_related : forall s l m,
+      core_related s l m ->
+      isXAddr4 m.(getPc) m.(getXAddrs) ->
+      Memory.loadWord m.(getMem) m.(getPc) =
+        Some (baseMem.LoadWord s.(semantics.ArchSt).(semantics.Pc) s.(semantics.ArchSt).(semantics.Imem)).
+  Proof.
+    intros s l m Hc Hx. destruct Hc as [_ _ _ _ _ Hpc _ [Hm1 [Hm2 [Hm3 [Hm4 Hm5]]]] _].
+    rewrite Hpc in *. set (pc := s.(semantics.ArchSt).(semantics.Pc)) in *.
+    set (imem := s.(semantics.ArchSt).(semantics.Imem)) in *.
+    set (dmem := s.(semantics.ArchSt).(semantics.Dmem)) in *.
+    destruct Hx as [X0 [X1 [X2 X3]]]. unfold isXAddr1 in *.
+    pose proof (bits.unsigned_range pc ltac:(unfold WIDTH; lia)) as Hpcr.
+    (* the four executable addresses, in footprint form *)
+    assert (F : forall k, (0 <= k <= 3)%Z ->
+              In (Zmod.add pc (bits.of_Z 32 k)) m.(getXAddrs) /\
+              to_N (Zmod.add pc (bits.of_Z 32 k)) = (to_N pc + Z.to_N k)%N).
+    { intros k Hk. pose proof (Hm5 _ X0) as Hb.
+      assert (Hk4 : (k = 0 \/ k = 1 \/ k = 2 \/ k = 3)%Z) by lia.
+      split.
+      - destruct Hk4 as [-> | [-> | [-> | ->]]].
+        + replace (Zmod.add pc (bits.of_Z 32 0)) with pc; [exact X0 |].
+          apply Zmod.unsigned_inj. rewrite Zmod.unsigned_add, bits.unsigned_of_Z_small by (pow32; lia).
+          rewrite Z.add_0_r. symmetry. apply Z.mod_small. pow32. lia.
+        + exact X1.
+        + exact X2.
+        + exact X3.
+      - apply to_N_add_small; lia. }
+    (* each byte is present in riscv-coq's memory and equal to granite's *)
+    assert (G : forall k, (0 <= k <= 3)%Z ->
+              map.get m.(getMem) (Zmod.add pc (bits.of_Z 32 k)) =
+              Some (to_byte (baseMem.load_byte (to_N pc + Z.to_N k) imem))).
+    { intros k Hk. destruct (F k Hk) as [Fin Fn].
+      rewrite Hm1 by (apply Hm4; exact Fin). rewrite Hm3 by exact Fin. rewrite Fn. reflexivity. }
+    unfold Memory.loadWord, coqutil.Map.Memory.load_Z, coqutil.Map.Memory.load_bytes, coqutil.Map.Memory.footprint.
+    cbn [List.map List.seq option_all].
+    rewrite (G 0%Z), (G 1%Z), (G 2%Z), (G 3%Z) by lia. cbn [option_all].
+    unfold baseMem.LoadWord. cbn [baseMem.load_bytes].
+    rewrite <- le_combine_granite. cbn [List.map].
+    cbn [Z.to_N N.of_nat Pos.of_succ_nat].
+    unfold baseMem.load_byte.
+    replace (to_N pc + 0)%N with (to_N pc) by lia.
+    replace (to_N pc + 1 + 1 + 1)%N with (to_N pc + 3)%N by lia.
+    replace (to_N pc + 1 + 1)%N with (to_N pc + 2)%N by lia.
+    reflexivity.
   Qed.
 
   (** *** The micro-steps *)
