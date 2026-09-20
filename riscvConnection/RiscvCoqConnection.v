@@ -572,10 +572,36 @@ Section Connection.
   Hypothesis leak_step : forall g m g' m',
       related g m -> related g' m' -> True. (* placeholder: to be stated with the projection *)
 
-  (* OPEN ISSUE (progress, only for [eventually]): the driver schedules
-     micro-steps and MMIO responses arrive, so that granite cannot stutter
-     forever.  [measure] counts the cycles until the next instruction retires. *)
-  Context (measure : GState -> nat).
+  (* Progress (only for [eventually]): fair inputs schedule a micro-step every
+     cycle and keep the MMIO handshake ready and valid, so granite cannot
+     stutter forever.  [measure] is the number of stuttering cycles until the
+     next retirement on a one-micro-step-per-cycle driver: the phase distance
+     to [StepInstr], then the MMIO wait (request to send, response to receive). *)
+  Definition phase_measure (s : GSt) : nat :=
+    match s.(semantics.Phase) with
+    | StepInterrupt => 5
+    | StepLeak => 4
+    | StepInstr _ => 3
+    | StepWaitMMIOResp _ =>
+        match s.(semantics.MMIOReqBuffer) with
+        | _ :: _ => 2
+        | [] => match s.(semantics.MMIORespBuffer) with [] => 1 | _ => 0 end
+        end
+    end.
+  Definition measure (g : GState) : nat := phase_measure (fst g).
+
+  Lemma wait_measure_le : forall s req,
+      s.(semantics.Phase) = StepWaitMMIOResp req -> (phase_measure s <= 2)%nat.
+  Proof.
+    intros s req H. unfold phase_measure. rewrite H.
+    destruct (semantics.MMIOReqBuffer s); [destruct (semantics.MMIORespBuffer s) |]; lia.
+  Qed.
+  Lemma nonwait_measure_ge : forall s,
+      (forall req, s.(semantics.Phase) <> StepWaitMMIOResp req) -> (3 <= phase_measure s)%nat.
+  Proof.
+    intros s H. unfold phase_measure. destruct (semantics.Phase s) eqn:E; try lia.
+    exfalso. eapply H. reflexivity.
+  Qed.
 
   (** ** The core lemma *)
 
@@ -1053,10 +1079,113 @@ Section Connection.
           { right. exact HR4. }
   Qed.
 
+  (** *** The measure across the cycle *)
+
+  Lemma phase_measure_set_default : forall s nd,
+      phase_measure (s <| semantics.DefaultMachine := nd |>) = phase_measure s.
+  Proof. intros. unfold phase_measure, RecordSet.set. reflexivity. Qed.
+  Lemma phase_measure_update_mmio : forall s dmd,
+      phase_measure (semantics.update_mmio s dmd) = phase_measure s.
+  Proof.
+    intros. unfold phase_measure, semantics.update_mmio, RecordSet.set. cbn.
+    destruct (semantics.Phase s); try reflexivity.
+    destruct (semantics.MMIOReqBuffer s); [destruct (semantics.MMIORespBuffer s) |]; reflexivity.
+  Qed.
+  Lemma phase_measure_prologue_nonwait : forall s i,
+      (forall req, s.(semantics.Phase) <> StepWaitMMIOResp req) ->
+      phase_measure (prologue s i) = phase_measure s.
+  Proof.
+    intros s i H. unfold phase_measure. rewrite prologue_phase.
+    destruct (semantics.Phase s) eqn:E; try reflexivity. exfalso. eapply H. reflexivity.
+  Qed.
+
+  (* one stuttering micro-step decreases the measure, except that a waiting
+     state may keep waiting *)
+  Lemma mstep_measure : forall s l m Q x dmd,
+      related (s, l) m -> run1_step m Q ->
+      retired (mstep dmd s x) l Q \/
+      (related (mstep dmd s x, l) m /\
+       ((phase_measure (mstep dmd s x) < phase_measure s)%nat \/
+        exists req, (mstep dmd s x).(semantics.Phase) = StepWaitMMIOResp req)).
+  Proof.
+    intros s l m Q x dmd HR HQ.
+    destruct (related_phase _ _ HR) as [Hph | [Hph | [[inst Hph] | [req Hph]]]].
+    - destruct (mstutter_leak s l m x dmd HR Hph) as [HR' [inst Hph']].
+      right. split; [exact HR' |]. left.
+      set (s' := mstep dmd s x) in *; clearbody s'.
+      unfold phase_measure. rewrite Hph, Hph'. lia.
+    - destruct (mstutter_interrupt s l m x dmd HR Hph) as [HR' Hph'].
+      right. split; [exact HR' |]. left.
+      set (s' := mstep dmd s x) in *; clearbody s'.
+      unfold phase_measure. rewrite Hph, Hph'. lia.
+    - destruct (mretire s l m Q x dmd inst HR HQ Hph) as [H | [HR' [req [Hph' Hbuf]]]]; [left; exact H |].
+      right. split; [exact HR' |]. left.
+      set (s' := mstep dmd s x) in *; clearbody s'.
+      unfold phase_measure. rewrite Hph, Hph'.
+      destruct (semantics.MMIOReqBuffer s'); [exfalso; apply Hbuf; reflexivity | lia].
+    - destruct (mwait s l m Q x dmd req HR HQ Hph) as [H | [HR' Hph']]; [left; exact H |].
+      right. split; [exact HR' | right]. eauto.
+  Qed.
+
+  (* at most three micro-steps, at least one, from a related state that is not
+     waiting on MMIO: a retirement or a measure decrease *)
+  Lemma msteps_measure : forall xs s l m Q dmd,
+      xs <> [] -> (length xs <= 3)%nat ->
+      (forall req, s.(semantics.Phase) <> StepWaitMMIOResp req) ->
+      related (s, l) m -> run1_step m Q ->
+      (exists m2, related (msteps dmd xs s, l) m2 /\ Q m2) \/
+      (related (msteps dmd xs s, l) m /\ (phase_measure (msteps dmd xs s) < phase_measure s)%nat).
+  Proof.
+    intros xs s l m Q dmd Hne Hlen Hnw HR HQ.
+    pose proof (nonwait_measure_ge s Hnw) as Hge.
+    (* a state below [s] stays below [s] after a stutter *)
+    assert (Hdec : forall s1 s2, (phase_measure s1 < phase_measure s)%nat ->
+              ((phase_measure s2 < phase_measure s1)%nat \/
+               exists req, s2.(semantics.Phase) = StepWaitMMIOResp req) ->
+              (phase_measure s2 < phase_measure s)%nat).
+    { intros s1 s2 H1 [H2 | [req H2]]; [lia | pose proof (wait_measure_le _ _ H2); lia]. }
+    assert (Hdec0 : forall s2,
+              ((phase_measure s2 < phase_measure s)%nat \/
+               exists req, s2.(semantics.Phase) = StepWaitMMIOResp req) ->
+              (phase_measure s2 < phase_measure s)%nat).
+    { intros s2 [H2 | [req H2]]; [lia | pose proof (wait_measure_le _ _ H2); lia]. }
+    destruct xs as [| a [| b [| c [| d rest]]]]; cbn in Hlen; try lia; [exfalso; apply Hne; reflexivity | ..];
+      unfold msteps; cbn [fold_left].
+    - destruct (mstep_measure s l m Q a dmd HR HQ) as [[m2 [HR2 [HQ2 _]]] | [HR2 Hm2]].
+      + left. eauto.
+      + right. split; [exact HR2 | exact (Hdec0 _ Hm2)].
+    - destruct (mstep_measure s l m Q a dmd HR HQ) as [[m2 [HR2 [HQ2 Hph2]]] | [HR2 Hm2]].
+      + left. exists m2. split; [| exact HQ2].
+        exact (msteps_after_retire [b] _ l m2 dmd ltac:(cbn; lia) HR2 Hph2).
+      + pose proof (Hdec0 _ Hm2) as Hlt2.
+        destruct (mstep_measure _ l m Q b dmd HR2 HQ) as [[m2 [HR3 [HQ3 _]]] | [HR3 Hm3]].
+        * left. eauto.
+        * right. split; [exact HR3 | exact (Hdec _ _ Hlt2 Hm3)].
+    - destruct (mstep_measure s l m Q a dmd HR HQ) as [[m2 [HR2 [HQ2 Hph2]]] | [HR2 Hm2]].
+      + left. exists m2. split; [| exact HQ2].
+        exact (msteps_after_retire [b; c] _ l m2 dmd ltac:(cbn; lia) HR2 Hph2).
+      + pose proof (Hdec0 _ Hm2) as Hlt2.
+        destruct (mstep_measure _ l m Q b dmd HR2 HQ) as [[m2 [HR3 [HQ3 Hph3]]] | [HR3 Hm3]].
+        * left. exists m2. split; [| exact HQ3].
+          exact (msteps_after_retire [c] _ l m2 dmd ltac:(cbn; lia) HR3 Hph3).
+        * pose proof (Hdec _ _ Hlt2 Hm3) as Hlt3.
+          destruct (mstep_measure _ l m Q c dmd HR3 HQ) as [[m2 [HR4 [HQ4 _]]] | [HR4 Hm4]].
+          { left. eauto. }
+          { right. split; [exact HR4 | exact (Hdec _ _ Hlt3 Hm4)]. }
+  Qed.
+
+  (* a fair cycle from an MMIO wait: the prologue sends the pending request
+     (ready) or delivers the response (valid), and a delivered response
+     retires at the first micro-step; the measure counts these two cycles *)
+  Lemma wait_cycle_progress : forall s l m Q i req,
+      related (s, l) m -> run1_step m Q -> s.(semantics.Phase) = StepWaitMMIOResp req -> fair i ->
+      (exists m2, related (next (s, l) i) m2 /\ Q m2) \/
+      (related (next (s, l) i) m /\ (measure (next (s, l) i) < measure (s, l))%nat).
+  Proof. (* ADMIT: MMIO wait phases *) Admitted.
+
   Lemma cycle_sim_i : forall g m Q i,
       related g m -> run1_step m Q -> admissible i ->
-      (exists m2, related (next g i) m2 /\ Q m2) \/
-      (related (next g i) m /\ (fair i -> measure (next g i) < measure g)).
+      (exists m2, related (next g i) m2 /\ Q m2) \/ related (next g i) m.
   Proof.
     intros g m Q i HR HQ Hi.
     assert (Hnext : next g i =
@@ -1070,17 +1199,43 @@ Section Connection.
     destruct (msteps_sim _ _ _ m Q (dmd_of (s, l) i) Hlen HRp HQ) as [[m2 [HR2 HQ2]] | HR2].
     - left. exists m2. split; [| exact HQ2].
       apply related_set_default. apply related_update_mmio. exact HR2.
-    - right. split.
-      + apply related_set_default. apply related_update_mmio. exact HR2.
-      + (* ADMIT: progress measure for fair inputs *) admit.
-  Admitted.
+    - right. apply related_set_default. apply related_update_mmio. exact HR2.
+  Qed.
+
+  Lemma cycle_sim_fair_i : forall g m Q i,
+      related g m -> run1_step m Q -> fair i ->
+      (exists m2, related (next g i) m2 /\ Q m2) \/
+      (related (next g i) m /\ (measure (next g i) < measure g)%nat).
+  Proof.
+    intros g m Q i HR HQ Hf.
+    assert (Hnext : next g i =
+      ((semantics.update_mmio (msteps (dmd_of g i) (snd i).(DriverOut_nSteps) (prologue (fst g) i)) (dmd_of g i))
+         <| semantics.DefaultMachine := nd_of g i |>, cycle_mmio (fst g) i ++ snd g)).
+    { rewrite <- next_unfold. unfold next at 2. reflexivity. }
+    destruct g as [s l].
+    destruct (related_phase _ _ HR) as [Hph | [Hph | [[inst Hph] | [req Hph]]]]; cbn [fst] in Hph;
+      [ | | | exact (wait_cycle_progress s l m Q i req HR HQ Hph Hf) ];
+      (assert (Hnw : forall req, s.(semantics.Phase) <> StepWaitMMIOResp req) by (intros req' E; rewrite Hph in E; discriminate));
+      destruct Hf as [Hi [Hne [_ _]]];
+      pose proof (related_prologue s l m i HR Hi) as HRp;
+      destruct Hi as [_ Hlen];
+      (assert (Hnwp : forall req, (prologue s i).(semantics.Phase) <> StepWaitMMIOResp req)
+        by (rewrite prologue_phase; exact Hnw));
+      rewrite Hnext; unfold measure; cbn [fst snd];
+      (destruct (msteps_measure _ _ _ m Q (dmd_of (s, l) i) Hne Hlen Hnwp HRp HQ) as [[m2 [HR2 HQ2]] | [HR2 Hlt]];
+       [ left; exists m2; split; [| exact HQ2]; apply related_set_default; apply related_update_mmio; exact HR2
+       | right; split;
+         [ apply related_set_default; apply related_update_mmio; exact HR2
+         | rewrite phase_measure_set_default, phase_measure_update_mmio;
+           rewrite (phase_measure_prologue_nonwait s i Hnw) in Hlt; exact Hlt ] ]).
+  Qed.
 
   (* the two forms the generic section consumes *)
   Lemma cycle_sim : forall g m Q,
       related g m -> run1_step m Q ->
       granite_step g (fun g' => (exists m', related g' m' /\ Q m') \/ related g' m).
   Proof.
-    intros g m Q HR HQ i Hi. destruct (cycle_sim_i g m Q i HR HQ Hi) as [H | [H _]]; eauto.
+    intros g m Q HR HQ i Hi. exact (cycle_sim_i g m Q i HR HQ Hi).
   Qed.
 
   Lemma cycle_sim_fair : forall g m Q,
@@ -1088,7 +1243,7 @@ Section Connection.
       granite_step_fair g (fun g' => (exists m', related g' m' /\ Q m') \/
                                      (related g' m /\ measure g' < measure g)).
   Proof.
-    intros g m Q HR HQ i Hi. destruct (cycle_sim_i g m Q i HR HQ (proj1 Hi)) as [H | [H Hlt]]; eauto.
+    intros g m Q HR HQ i Hi. exact (cycle_sim_fair_i g m Q i HR HQ Hi).
   Qed.
 
   (** ** Corollaries: two-line applications of the generic section *)
