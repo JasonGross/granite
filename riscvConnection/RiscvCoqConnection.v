@@ -202,10 +202,26 @@ Section Connection.
      log, as bedrock2's Kami connection does with [KState] *)
   Definition GState : Type := GSt * list MMIOEvent.
 
-  (* the MMIO events of one clock cycle, read off the ready/valid handshake of
-     [Spec.v] ([consumeMMIOReq], [consumeMMIOResp], [update_mmio]): a store when
-     its request is accepted, a load when its response is accepted *)
-  Context (cycle_mmio : GSt -> GInput -> list MMIOEvent).
+  (* The MMIO events of one clock cycle, read off the ready/valid handshake of
+     [Spec.v] ([consumeMMIOReq], [consumeMMIOResp]): a store is logged when
+     its request is accepted (granite valid, environment ready), a load when
+     its response is accepted (granite ready, environment valid); the response
+     carries the address.  Vocabulary of bedrock2's
+     [SPI.mmio_trace_abstraction_relation]. *)
+  Definition cycle_mmio (s : GSt) (i : GInput) : list MMIOEvent :=
+    let pub := fst (fst i) in
+    let sec := snd (fst i) in
+    (if s.(semantics.PubOutputWires).(PubOutput_mmio).(PubHandshake_valid)
+        && pub.(PubInput_mmio).(PubHandshake_ready)
+     then match s.(semantics.MMIOReqBuffer) with
+          | specMemory.MMIOStore a v :: _ => [("st"%string, a, v)]
+          | _ => []
+          end
+     else []) ++
+    (if s.(semantics.PubOutputWires).(PubOutput_mmio).(PubHandshake_ready)
+        && pub.(PubInput_mmio).(PubHandshake_valid)
+     then [("ld"%string, sec.(SecInput_mmioData).(mem_resp_addr), sec.(SecInput_mmioData).(mem_resp_data))]
+     else []).
 
   (* Which per-cycle inputs the theorems quantify over.  RESTRICTIONS (not
      discrepancies): riscv-coq has no interrupts, so no input asserts one; and
@@ -283,7 +299,8 @@ Section Connection.
   (* metrics are not related (as in bedrock2's Kami connection, [getMetrics] is unconstrained) *)
   Inductive related : GState -> MetricRiscvMachine -> Prop :=
   | related_idle : forall (g : GState) (m : MetricRiscvMachine),
-      (fst g).(semantics.Phase) = StepLeak ->
+      ((fst g).(semantics.Phase) = StepLeak \/ (fst g).(semantics.Phase) = StepInterrupt) ->
+      (fst g).(semantics.PubOutputWires) = IFC.default_PubOutput ->
       (fst g).(semantics.MMIOReqBuffer) = [] ->
       (fst g).(semantics.MMIORespBuffer) = [] ->
       (fst g).(semantics.InterruptSt) = None ->
@@ -527,11 +544,126 @@ Section Connection.
      instruction ([execStrt]/[execCtrl]/[execMem] of [Spec.v] against
      [ExecuteI]/[ExecuteM] unfolded through the platform), the MMIO wait
      sequence, and the phase bookkeeping. *)
+  (** *** The pieces of one cycle *)
+
+  (* one driver micro-step from a granite state, [Spec.v:572-611] *)
+  Local Notation micro s x := (fst (semantics.doDriverStep s x)).
+
+  (* No micro-step: only the interrupt latch, the handshake and the default
+     machine move.  In idle phases the wires are idle, so nothing is consumed
+     and no MMIO event is logged; the relation ignores the default machine. *)
+  Lemma stutter_empty : forall g m i,
+      related g m -> admissible i -> (snd i).(DriverOut_nSteps) = [] ->
+      related (next g i) m.
+  Proof. (* ADMIT: MMIO wait phases (in-flight handshake bookkeeping); the idle case is routine *) Admitted.
+
+  (* [StepInterrupt] with no interrupt pending: the phase goes back to
+     [StepLeak], nothing else changes (Spec.v:583-591 with [None]). *)
+  Lemma stutter_interrupt : forall g m i x,
+      related g m -> admissible i -> (snd i).(DriverOut_nSteps) = [x] ->
+      (fst g).(semantics.Phase) = StepInterrupt ->
+      related (next g i) m.
+  Proof. (* ADMIT: interrupts (the [InterruptSt = None] invariant is what admissible_no_interrupt buys) *) Admitted.
+
+  (* [StepLeak]: fetch from [Imem], decode, emit the leakage event, move to
+     [StepInstr]; riscv-coq has not stepped yet, so this is a stutter into an
+     in-flight state whose leakage is one event ahead of [getTrace]. *)
+  Lemma stutter_leak : forall g m i x,
+      related g m -> admissible i -> (snd i).(DriverOut_nSteps) = [x] ->
+      (fst g).(semantics.Phase) = StepLeak ->
+      related (next g i) m.
+  Proof. (* ADMIT: leakage alignment (granite's event vs riscv-coq's fetchInstr/executeInstr pair) *) Admitted.
+
+  (* [StepInstr]: the retiring cycle.  One lemma per instruction class; each
+     unfolds [run1_step] through the free-monad interpreter for that
+     instruction ([decode_agree] identifies the decoded instruction) and
+     granite's [execStrt]/[execCtrl]/[execMem]. *)
+  Definition retires (g : GState) (m : MetricRiscvMachine) (Q : MetricRiscvMachine -> Prop) (i : GInput) : Prop :=
+    exists m', related (next g i) m' /\ Q m'.
+
+  Lemma retire_alu : forall g m Q i x inst,
+      related g m -> run1_step m Q -> admissible i -> (snd i).(DriverOut_nSteps) = [x] ->
+      (fst g).(semantics.Phase) = StepInstr inst ->
+      (match inst with
+       | instrs.Strt (instrs.Addi _ _ _) | instrs.Strt (instrs.Add _ _ _) | instrs.Strt (instrs.Xor _ _ _)
+       | instrs.Strt (instrs.Slli _ _ _) | instrs.Strt (instrs.Srli _ _ _)
+       | instrs.Strt (instrs.Lui _ _) | instrs.Strt (instrs.Auipc _ _) => True
+       | _ => False end) ->
+      retires g m Q i.
+  Proof. (* ADMIT: not a discrepancy; ALU class unfinished (see report) *) Admitted.
+
+  Lemma retire_mul : forall g m Q i x inst,
+      related g m -> run1_step m Q -> admissible i -> (snd i).(DriverOut_nSteps) = [x] ->
+      (fst g).(semantics.Phase) = StepInstr inst ->
+      (match inst with instrs.Strt (instrs.Mul _ _ _) => True | _ => False end) ->
+      retires g m Q i.
+  Proof. (* ADMIT: leakage alignment (granite's mul leaks the zero-operand bit) *) Admitted.
+
+  Lemma retire_ctrl : forall g m Q i x inst,
+      related g m -> run1_step m Q -> admissible i -> (snd i).(DriverOut_nSteps) = [x] ->
+      (fst g).(semantics.Phase) = StepInstr inst ->
+      (match inst with instrs.Ctrl _ => True | _ => False end) ->
+      retires g m Q i.
+  Proof. (* ADMIT: not a discrepancy; branch/jalr class unfinished; the misaligned-target trap is excluded by the platform *) Admitted.
+
+  Lemma retire_mem : forall g m Q i x inst,
+      related g m -> run1_step m Q -> admissible i -> (snd i).(DriverOut_nSteps) = [x] ->
+      (fst g).(semantics.Phase) = StepInstr inst ->
+      (match inst with instrs.Mem _ => True | _ => False end) ->
+      retires g m Q i \/ related (next g i) m.   (* MMIO: request issued, retire later *)
+  Proof. (* ADMIT: misaligned access (no_misaligned_access) and MMIO wait phases *) Admitted.
+
+  Lemma retire_csr_or_invalid : forall g m Q i x inst,
+      related g m -> run1_step m Q -> admissible i -> (snd i).(DriverOut_nSteps) = [x] ->
+      (fst g).(semantics.Phase) = StepInstr inst ->
+      (match inst with instrs.Strt (instrs.Csrrw _ _ _) | instrs.InvalidInstr _ => True | _ => False end) ->
+      False.
+  Proof. (* ADMIT: CSR/trap semantics; on this platform run1_step m Q is False for these, via csr_primitives_stuck and isa_coverage *) Admitted.
+
+  (* [StepWaitMMIOResp]: retire when a response is buffered, else stutter *)
+  Lemma mmio_wait : forall g m Q i x req,
+      related g m -> run1_step m Q -> admissible i -> (snd i).(DriverOut_nSteps) = [x] ->
+      (fst g).(semantics.Phase) = StepWaitMMIOResp req ->
+      retires g m Q i \/ related (next g i) m.
+  Proof. (* ADMIT: MMIO wait phases *) Admitted.
+
+  (* the measure: cycles until the next retirement on fair inputs *)
+  Hypothesis measure_stutter : forall g m i,
+      related g m -> fair i -> related (next g i) m -> ~ retires g m (fun _ => True) i ->
+      measure (next g i) < measure g.
+
   Lemma cycle_sim_i : forall g m Q i,
       related g m -> run1_step m Q -> admissible i ->
       (exists m', related (next g i) m' /\ Q m') \/
       (related (next g i) m /\ (fair i -> measure (next g i) < measure g)).
-  Proof. Admitted.
+  Proof.
+    intros g m Q i HR HQ Hi.
+    (* dispatch on the driver list (length <= 1) and the phase *)
+    destruct (snd i).(DriverOut_nSteps) as [| x [| y rest]] eqn:Hn.
+    - right. split. { exact (stutter_empty g m i HR Hi Hn). }
+      intros [_ [Hne _]]. congruence.
+    - destruct (fst g).(semantics.Phase) as [| inst | req | ] eqn:Hph.
+      + (* StepLeak *) right. split. { exact (stutter_leak g m i x HR Hi Hn Hph). }
+        (* ADMIT: progress measure for fair inputs *) admit.
+      + (* StepInstr *)
+        destruct inst as [si | ci | mi | w'].
+        * destruct si;
+            first [ left; exact (retire_alu g m Q i x _ HR HQ Hi Hn Hph I)
+                  | left; exact (retire_mul g m Q i x _ HR HQ Hi Hn Hph I)
+                  | exfalso; exact (retire_csr_or_invalid g m Q i x _ HR HQ Hi Hn Hph I) ].
+        * left. exact (retire_ctrl g m Q i x _ HR HQ Hi Hn Hph I).
+        * destruct (retire_mem g m Q i x _ HR HQ Hi Hn Hph I) as [H | H].
+          { left. exact H. }
+          { right. split. { exact H. } (* ADMIT: progress measure for fair inputs *) admit. }
+        * exfalso. exact (retire_csr_or_invalid g m Q i x _ HR HQ Hi Hn Hph I).
+      + (* StepWaitMMIOResp *)
+        destruct (mmio_wait g m Q i x req HR HQ Hi Hn Hph) as [H | H].
+        { left. exact H. }
+        { right. split. { exact H. } (* ADMIT: progress measure for fair inputs *) admit. }
+      + (* StepInterrupt *) right. split. { exact (stutter_interrupt g m i x HR Hi Hn Hph). }
+        (* ADMIT: progress measure for fair inputs *) admit.
+    - exfalso. destruct Hi as [_ Hlen]. rewrite Hn in Hlen. cbn in Hlen. lia.
+  Admitted.
 
   (* the two forms the generic section consumes *)
   Lemma cycle_sim : forall g m Q,
