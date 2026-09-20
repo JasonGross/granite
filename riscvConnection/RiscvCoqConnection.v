@@ -32,7 +32,7 @@
     not take.  The same forward direction is what bedrock2's Kami connection
     proves ([processor/KamiRiscvStep.v], [kamiStep_sound]). *)
 
-From Stdlib Require Import ZArith Lists.List Strings.String.
+From Stdlib Require Import ZArith Lists.List Strings.String Wf_nat Lia.
 Import ListNotations.
 From coqutil Require Import Map.Interface Word.Bitwidth Byte.
 From coqutil Require Semantics.OmniSmallstepCombinators.
@@ -51,23 +51,31 @@ Import OmniSmallstepCombinators.
 
 Section OmniSimulation.
   Context {A B : Type}.
-  (* omnisemantics steps: [step s P] means every successor of [s] satisfies [P] *)
-  Context (stepA : A -> (A -> Prop) -> Prop) (stepB : B -> (B -> Prop) -> Prop).
+  (* omnisemantics steps: [step s P] means every successor of [s] satisfies [P].
+     [stepB] ranges over all admissible inputs of the concrete system; [stepBf]
+     over a fair subclass.  [always] is
+     transferred for [stepB]; [eventually] needs fairness, since a stuttering
+     input that is always admissible would make every [eventually] false. *)
+  Context (stepA : A -> (A -> Prop) -> Prop).
+  Context (stepB stepBf : B -> (B -> Prop) -> Prop).
   (* the state relation, concrete state on the left *)
   Context (R : B -> A -> Prop).
-  (* decreases on every stuttering B-step; bounds how long B can stutter *)
+  (* decreases on every stuttering fair B-step; bounds how long B can stutter *)
   Context (measure : B -> nat).
 
-  Hypothesis stepA_weaken : forall a P Q, (forall x, P x -> Q x) -> stepA a P -> stepA a Q.
   Hypothesis stepB_weaken : forall b P Q, (forall x, P x -> Q x) -> stepB b P -> stepB b Q.
 
-  (* The single core assumption.  From related [b], [a], and a WP [Q] for one
-     A-step, every B-step either retires: it lands in a state related to an
-     A-successor allowed by [Q]; or stutters: it stays related to [a] and
-     decreases the measure. *)
+  (* The core assumptions, both instances of one per-input lemma in the
+     instantiation below.  From related [b], [a] and a WP [Q] for one A-step,
+     every B-step either retires (lands in a state related to an A-successor
+     allowed by [Q]) or stutters (stays related to [a]); on fair inputs a
+     stutter also decreases the measure. *)
   Hypothesis core : forall b a Q,
       R b a -> stepA a Q ->
-      stepB b (fun b' => (exists a', R b' a' /\ Q a') \/ (R b' a /\ measure b' < measure b)).
+      stepB b (fun b' => (exists a', R b' a' /\ Q a') \/ R b' a).
+  Hypothesis core_fair : forall b a Q,
+      R b a -> stepA a Q ->
+      stepBf b (fun b' => (exists a', R b' a' /\ Q a') \/ (R b' a /\ measure b' < measure b)).
 
   (* what an A-property becomes on the B side *)
   Definition lift (P : A -> Prop) (b : B) : Prop := exists a, R b a /\ P a.
@@ -75,41 +83,67 @@ Section OmniSimulation.
   Lemma lift_mono : forall (P Q : A -> Prop), (forall a, P a -> Q a) -> forall b, lift P b -> lift Q b.
   Proof. unfold lift. intros P Q HPQ b [a [Ha HP]]. eauto. Qed.
 
-  Lemma always_weaken : forall (P Q : A -> Prop) a,
-      (forall x, P x -> Q x) -> always stepA P a -> always stepA Q a.
-  Proof. intros P Q a HPQ [I E Pr U]. exact (mk_always _ _ _ I E Pr (fun s HI => HPQ _ (U s HI))). Qed.
-
-  (* [always] transfer: invariant [lift I] where [I] is the A-invariant.  Uses
-     [core] with [Q := I]; stuttering steps keep [lift I] trivially.  Does not
-     need the measure. *)
+  (* [always] transfer: the B-invariant is [lift I] for the A-invariant [I];
+     [core] with [Q := I]; stuttering steps keep [lift I] with the same [a]. *)
   Lemma transfer_always : forall (P : A -> Prop) a b,
       R b a -> always stepA P a -> always stepB (lift P) b.
-  Proof. Admitted.
+  Proof.
+    intros P a b HR [I E Pr U].
+    apply (mk_always _ _ _ (fun b => exists a, R b a /\ I a)).
+    - eauto.
+    - intros b0 [a0 [HR0 HI0]].
+      eapply stepB_weaken. 2: exact (core _ _ _ HR0 (Pr _ HI0)).
+      intros b' [[a' [HR' HI']] | HR']; eauto.
+    - intros b0 [a0 [HR0 HI0]]. exists a0. eauto.
+  Qed.
 
   (* [eventually] transfer: outer induction on [eventually stepA P a], inner
-     strong induction on [measure b] for the stuttering steps.  [core] with
-     [Q := midset] hands each retiring B-successor to the outer induction
+     strong induction on [measure b] for the stuttering steps.  [core_fair]
+     with [Q := midset] hands each retiring B-successor to the outer induction
      hypothesis and each stuttering one to the inner. *)
   Lemma transfer_eventually : forall (P : A -> Prop) a b,
-      R b a -> eventually stepA P a -> eventually stepB (lift P) b.
-  Proof. Admitted.
+      R b a -> eventually stepA P a -> eventually stepBf (lift P) b.
+  Proof.
+    intros P a b HR H. revert b HR.
+    induction H.
+    - intros b HR. apply eventually_done. eexists; eauto.
+    - intros b. remember (measure b) as n eqn:Hn. revert b Hn.
+      induction n as [n IHn] using lt_wf_ind. intros b Hn HR.
+      eapply eventually_step. 1: exact (core_fair _ _ _ HR ltac:(eassumption)).
+      intros b' [[a' [HR' Hmid]] | [HR' Hlt]].
+      + eauto.
+      + eapply IHn; eauto. lia.
+  Qed.
+
+  (* [runsTo] ([riscv.Utility.runsToNonDet]) is [eventually] constructor for
+     constructor; same proof *)
+  Lemma transfer_runsTo : forall (P : A -> Prop) a b,
+      R b a -> runsTo stepA a P -> eventually stepBf (lift P) b.
+  Proof.
+    intros P a b HR H. revert b HR.
+    induction H.
+    - intros b HR. apply eventually_done. eexists; eauto.
+    - intros b. remember (measure b) as n eqn:Hn. revert b Hn.
+      induction n as [n IHn] using lt_wf_ind. intros b Hn HR.
+      eapply eventually_step. 1: exact (core_fair _ _ _ HR ltac:(eassumption)).
+      intros b' [[a' [HR' Hmid]] | [HR' Hlt]].
+      + eauto.
+      + eapply IHn; eauto. lia.
+  Qed.
 
   (* the shape of bedrock2's event-loop theorems ([always (eventually good)]):
-     [transfer_always] followed by [transfer_eventually] under the [always] *)
+     under any admissible inputs, always, under fair inputs eventually [P] *)
   Lemma transfer_always_eventually : forall (P : A -> Prop) a b,
       R b a ->
       always stepA (eventually stepA P) a ->
-      always stepB (eventually stepB (lift P)) b.
+      always stepB (eventually stepBf (lift P)) b.
   Proof.
-    (* [transfer_always] with [P := eventually stepA P], then weaken the
-       invariant's [Use] clause pointwise with [transfer_eventually] *)
-  Admitted.
-
-  (* [runsTo] is [eventually] ([riscv.Utility.runsToNonDet.runsTo] vs
-     [OmniSmallstepCombinators.eventually]; bedrock2's [runsTo_is_eventually]) *)
-  Lemma transfer_runsTo : forall (P : A -> Prop) a b,
-      R b a -> runsTo stepA a P -> eventually stepB (lift P) b.
-  Proof. Admitted.
+    intros P a b HR H.
+    pose proof (transfer_always _ _ _ HR H) as [I E Pr U].
+    apply (mk_always _ _ _ I E Pr).
+    intros b0 HI. destruct (U b0 HI) as [a0 [HR0 Hev]].
+    exact (transfer_eventually _ _ _ HR0 Hev).
+  Qed.
 End OmniSimulation.
 
 (** * Instantiation: riscv-coq [run1] on the left, granite [Spec.v] on the right *)
@@ -314,6 +348,15 @@ Section Connection.
                                 (related g' m /\ measure g' < measure g)).
   Proof. Admitted.
 
+  (* the lax form of [cycle_sim] (no measure), for [always] *)
+  Lemma cycle_sim_lax : forall g m Q,
+      related g m -> run1_step m Q ->
+      granite_step g (fun g' => (exists m', related g' m' /\ Q m') \/ related g' m).
+  Proof.
+    intros g m Q HR HQ. eapply granite_step_weaken. 2: exact (cycle_sim g m Q HR HQ).
+    intros g' [H | [H _]]; eauto.
+  Qed.
+
   (** ** Corollaries: two-line applications of the generic section *)
 
   Definition lift_g : (MetricRiscvMachine -> Prop) -> GState -> Prop := lift related.
@@ -326,8 +369,7 @@ Section Connection.
       always granite_step (lift_g P) g.
   Proof.
     intros P g m HR H.
-    exact (transfer_always run1_step granite_step related measure
-             run1_step_weaken granite_step_weaken cycle_sim P m g HR H).
+    exact (transfer_always run1_step granite_step related granite_step_weaken cycle_sim_lax P m g HR H).
   Qed.
 
   (* [eventually]/[runsTo] transfer: granite reaches, in finitely many cycles
@@ -338,8 +380,7 @@ Section Connection.
       eventually granite_step (lift_g P) g.
   Proof.
     intros P g m HR H.
-    exact (transfer_eventually run1_step granite_step related measure
-             run1_step_weaken granite_step_weaken cycle_sim P m g HR H).
+    exact (transfer_eventually run1_step granite_step related measure cycle_sim P m g HR H).
   Qed.
 
   Corollary granite_runsTo : forall (P : MetricRiscvMachine -> Prop) g m,
@@ -348,8 +389,7 @@ Section Connection.
       eventually granite_step (lift_g P) g.
   Proof.
     intros P g m HR H.
-    exact (transfer_runsTo run1_step granite_step related measure
-             run1_step_weaken granite_step_weaken cycle_sim P m g HR H).
+    exact (transfer_runsTo run1_step granite_step related measure cycle_sim P m g HR H).
   Qed.
 
   (* the bedrock2 event-loop shape ([always (eventually good_trace)],
@@ -361,8 +401,8 @@ Section Connection.
       always granite_step (eventually granite_step (lift_g P)) g.
   Proof.
     intros P g m HR H.
-    exact (transfer_always_eventually run1_step granite_step related measure
-             run1_step_weaken granite_step_weaken cycle_sim P m g HR H).
+    exact (transfer_always_eventually run1_step granite_step granite_step related measure
+             granite_step_weaken cycle_sim_lax cycle_sim P m g HR H).
   Qed.
 
   (** ** Composition with a trace property (GarageDoor / End2EndLightbulb shape) *)
