@@ -32,9 +32,9 @@
     not take.  The same forward direction is what bedrock2's Kami connection
     proves ([processor/KamiRiscvStep.v], [kamiStep_sound]). *)
 
-From Stdlib Require Import ZArith Lists.List Strings.String Wf_nat Lia.
+From Stdlib Require Import ZArith Lists.List Strings.String Wf_nat Lia Btauto.
 Import ListNotations.
-From coqutil Require Import Map.Interface Word.Bitwidth Byte.
+From coqutil Require Import Map.Interface Word.Bitwidth Byte Z.BitOps Z.bitblast.
 From coqutil Require Semantics.OmniSmallstepCombinators.
 From riscv Require Import Utility.Utility Utility.Monads Spec.Decode
   Spec.Primitives Spec.LeakageOfInstr Platform.RiscvMachine
@@ -319,11 +319,170 @@ Section Connection.
   Hypothesis isa_coverage : forall g m w,
       related g m -> Memory.loadWord m.(getMem) m.(getPc) = Some w -> granite_decodes w.
 
-  (* decoder agreement on the covered subset: to be proved, not assumed *)
-  Context (to_riscv : instrs.Instr -> Instruction).
+  (** ** Decoder agreement on the covered subset *)
+
+  (* granite's [Csr] enumeration back to its CSR index *)
+  Definition csr_index (c : Csr) : Z :=
+    match c with
+    | mtvec => 773 | mepc => 833 | mcause => 834 | mtval => 835 | mie => 0x304
+    end.
+
+  (* granite's decoded instruction as riscv-coq's.  Immediates are written the
+     way riscv-coq's [decode] computes them ([signExtend k] of the unsigned
+     field), so that [decode_agree] is about unsigned fields only; the
+     semantic lemmas use [signExtend k (unsigned x) = signed x]. *)
+  Definition to_riscv (i : instrs.Instr) : Instruction :=
+    let u := fun {n} (x : bits n) => Zmod.unsigned x in
+    match i with
+    | instrs.Strt (instrs.Addi rd rs1 imm12) => IInstruction (Decode.Addi (u rd) (u rs1) (signExtend 12 (u imm12)))
+    | instrs.Strt (instrs.Add rd rs1 rs2) => IInstruction (Decode.Add (u rd) (u rs1) (u rs2))
+    | instrs.Strt (instrs.Mul rd rs1 rs2) => MInstruction (Decode.Mul (u rd) (u rs1) (u rs2))
+    | instrs.Strt (instrs.Csrrw rd rs1 csr) => CSRInstruction (Decode.Csrrw (u rd) (u rs1) (csr_index csr))
+    | instrs.Strt (instrs.Auipc rd off) => IInstruction (Decode.Auipc (u rd) (signExtend 32 (Z.shiftl (u off) 12)))
+    | instrs.Strt (instrs.Xor rd rs1 rs2) => IInstruction (Decode.Xor (u rd) (u rs1) (u rs2))
+    | instrs.Strt (instrs.Slli rd rs1 sh) => IInstruction (Decode.Slli (u rd) (u rs1) (u sh))
+    | instrs.Strt (instrs.Srli rd rs1 sh) => IInstruction (Decode.Srli (u rd) (u rs1) (u sh))
+    | instrs.Strt (instrs.Lui rd imm20) => IInstruction (Decode.Lui (u rd) (signExtend 32 (Z.shiftl (u imm20) 12)))
+    | instrs.Ctrl (instrs.Beq rs1 rs2 off) => IInstruction (Decode.Beq (u rs1) (u rs2) (signExtend 13 (u off)))
+    | instrs.Ctrl (instrs.Jalr rd rs1 off) => IInstruction (Decode.Jalr (u rd) (u rs1) (signExtend 12 (u off)))
+    | instrs.Ctrl (instrs.Bne rs1 rs2 off) => IInstruction (Decode.Bne (u rs1) (u rs2) (signExtend 13 (u off)))
+    | instrs.Mem (instrs.Lw rd rs1 off) => IInstruction (Decode.Lw (u rd) (u rs1) (signExtend 12 (u off)))
+    | instrs.Mem (instrs.Sw rs1 rs2 off) => IInstruction (Decode.Sw (u rs1) (u rs2) (signExtend 12 (u off)))
+    | instrs.InvalidInstr w => InvalidInstruction (u w)
+    end.
+
+  (* riscv-coq's [bitSlice] on the unsigned value is granite's [Zmod.slice] *)
+  Lemma bitSlice_slice : forall lo hi (w : word), (0 <= lo <= hi)%Z ->
+      bitSlice (Zmod.unsigned w) lo hi = Zmod.unsigned (Zmod.slice lo hi w).
+  Proof. intros. rewrite bitSlice_alt by lia. rewrite bits.unsigned_slice by lia. reflexivity. Qed.
+
+  Lemma bitSlice_firstn : forall n (w : word), (0 <= n)%Z ->
+      bitSlice (Zmod.unsigned w) 0 n = Zmod.unsigned (Zmod.firstn n w).
+  Proof.
+    intros. rewrite bitSlice_alt by lia. rewrite bits.unsigned_firstn.
+    rewrite Z.pow_0_r, Z.div_1_r, Z.sub_0_r. reflexivity.
+  Qed.
+
+  (* the two facts about bits 25..31 that the shift-immediate decoding needs *)
+  Lemma funct7_zero_facts : forall x : Z, (0 <= x)%Z -> bitSlice x 25 32 = 0%Z ->
+      bitSlice x 26 32 = 0%Z /\ bitSlice x 25 26 = 0%Z /\ bitSlice x 20 26 = bitSlice x 20 25.
+  Proof.
+    intros x Hx H. rewrite !bitSlice_alt in * by lia.
+    replace (2 ^ (32 - 25))%Z with 128%Z in H by reflexivity.
+    replace (2 ^ (32 - 26))%Z with 64%Z by reflexivity.
+    replace (2 ^ (26 - 25))%Z with 2%Z by reflexivity.
+    replace (2 ^ (26 - 20))%Z with 64%Z by reflexivity.
+    replace (2 ^ (25 - 20))%Z with 32%Z by reflexivity.
+    replace (x / 2 ^ 26)%Z with (x / 2 ^ 25 / 2)%Z by (rewrite Z.div_div by lia; reflexivity).
+    replace (x / 2 ^ 25)%Z with (x / 2 ^ 20 / 32)%Z in * by (rewrite Z.div_div by lia; reflexivity).
+    set (y := (x / 2 ^ 20)%Z) in *.
+    assert (Hy : (0 <= y)%Z) by (subst y; apply Z.div_pos; lia).
+    assert (Hq : (y / 32 = 128 * (y / 32 / 128))%Z) by (apply Z.div_exact; [lia | exact H]).
+    set (q := (y / 32 / 128)%Z) in *.
+    replace (y mod 64)%Z with (y mod (32 * 2))%Z by reflexivity.
+    rewrite (Z.rem_mul_r y 32 2) by lia.
+    rewrite Hq.
+    replace (128 * q)%Z with (q * 64 * 2)%Z by lia.
+    rewrite Z.div_mul by lia. rewrite !Z.mod_mul by lia.
+    repeat split; lia.
+  Qed.
+
+  Lemma funct7_zero_slices : forall w : word, Zmod.unsigned (Zmod.slice 25 32 w) = 0%Z ->
+      Zmod.unsigned (Zmod.slice 26 32 w) = 0%Z /\ Zmod.unsigned (Zmod.slice 25 26 w) = 0%Z /\
+      Zmod.unsigned (Zmod.slice 20 26 w) = Zmod.unsigned (Zmod.slice 20 25 w).
+  Proof.
+    intros w H. rewrite <- !bitSlice_slice by lia.
+    apply funct7_zero_facts; [apply bits.unsigned_range; lia | rewrite bitSlice_slice by lia; exact H].
+  Qed.
+
+  (* [l = literal] on granite fields becomes [Zmod.unsigned l = value] *)
+  Local Ltac field_fact H :=
+    lazymatch type of H with
+    | ?l = ?r =>
+        let v := eval vm_compute in (Zmod.unsigned r) in
+        let F := fresh "F" in
+        assert (F : Zmod.unsigned l = v) by (rewrite H; vm_compute; reflexivity);
+        clear H
+    | _ /\ _ => let H1 := fresh H in let H2 := fresh H in destruct H as [H1 H2]; field_fact H1; field_fact H2
+    end.
+
+  Local Ltac riscv_cbv :=
+    cbv -[Zmod.unsigned Zmod.slice Zmod.firstn Zmod.app Z.shiftl Z.lor Z.shiftr Z.land Z.lnot
+          signExtend bitSlice Z.smodulo andb orb Z.eqb csr_index].
+
+  Local Ltac riscv_reduce :=
+    unfold decode; cbv beta zeta;
+    rewrite ?(bitSlice_firstn 7) by lia;
+    repeat (rewrite bitSlice_slice by lia);
+    repeat match goal with F : Zmod.unsigned _ = _ |- _ => rewrite F; clear F end;
+    riscv_cbv;
+    repeat (progress (cbn [andb orb Z.eqb Pos.eqb];
+                      rewrite ?Bool.andb_false_r, ?Bool.andb_true_r; riscv_cbv)).
+
+  (* fold closed literal arithmetic *)
+  Local Ltac norm_lits :=
+    repeat match goal with
+      | |- context [(Z.pos ?a - Z.pos ?b)%Z] =>
+          let v := eval vm_compute in (Z.pos a - Z.pos b)%Z in change (Z.pos a - Z.pos b)%Z with v
+      | |- context [(Z.pos ?a + Z.pos ?b)%Z] =>
+          let v := eval vm_compute in (Z.pos a + Z.pos b)%Z in change (Z.pos a + Z.pos b)%Z with v
+      end.
+
+  (* granite assembles the B-type immediate with nested [Zmod.app]; riscv-coq
+     with shifted [Z.lor]s.  Provable by bit extensionality ([Z.bits_inj'] with
+     [Z.lor_spec]/[Z.shiftl_spec]); decoder bookkeeping, not a discrepancy. *)
+  Lemma b_imm_agree : forall w : word,
+      Zmod.unsigned (Zmod.app (zeroes : bits 1)
+                       (Zmod.app (Zmod.slice 8 12 w)
+                          (Zmod.app (Zmod.slice 25 31 w)
+                             (Zmod.app (Zmod.slice 7 8 w) (Zmod.slice 31 32 w)))))
+      = Z.lor (Z.lor (Z.lor (Z.shiftl (Zmod.unsigned (Zmod.slice 31 32 w)) 12)
+                            (Z.shiftl (Zmod.unsigned (Zmod.slice 25 31 w)) 5))
+                     (Z.shiftl (Zmod.unsigned (Zmod.slice 8 12 w)) 1))
+              (Z.shiftl (Zmod.unsigned (Zmod.slice 7 8 w)) 11).
+  Proof. (* ADMIT: decoder immediate bookkeeping (B-type), not a discrepancy *) Admitted.
+
+  (* [rewrite] must match [Zmod.unsigned] arguments up to conversion (the
+     modulus annotations differ between granite's field types and the lemmas) *)
+  Local Set Keyed Unification.
+
   Lemma decode_agree : forall w : word,
       granite_decodes w -> to_riscv (instrs.Decode.decode w) = decode iset (Zmod.unsigned w).
-  Proof. Admitted.
+  Proof.
+    intros w Hdec. unfold granite_decodes in Hdec.
+    unfold instrs.Decode.decode in *. cbv zeta in *. unfold WIDTH in *.
+    pose proof (bits.unsigned_range w ltac:(lia)) as Hw.
+    repeat case_decide; try (exfalso; exact Hdec).
+    all: repeat match goal with H : ~ _ |- _ => clear H end.
+    all: repeat match goal with H : _ = _ /\ _ |- _ => field_fact H | H : Zmod.firstn _ _ = _ |- _ => field_fact H end.
+    all: cbn [to_riscv].
+    (* csrrw: the CSR index must be one granite knows *)
+    all: lazymatch goal with
+         | |- context [lookupCSR ?c] =>
+             destruct (lookupCSR c) as [csr|] eqn:Hl; [cbn [to_riscv] | destruct Hdec]
+         | _ => idtac
+         end.
+    (* slli/srli: bits 25..31 are zero *)
+    all: try match goal with
+         | F : Zmod.unsigned (Zmod.slice 25 32 _) = 0%Z |- _ =>
+             pose proof (funct7_zero_slices _ F) as [? [? ?]]
+         end.
+    all: riscv_reduce.
+    all: try reflexivity.
+    (* csrrw: read the index off [lookupCSR] *)
+    all: try match goal with
+         | Hl : lookupCSR _ = Some _ |- _ =>
+             f_equal; f_equal; unfold lookupCSR in Hl; repeat case_bool_decide; try discriminate;
+             inversion Hl; subst; cbn [csr_index];
+             match goal with H : Zmod.slice 20 32 _ = _ |- _ => rewrite H end; vm_compute; reflexivity
+         end.
+    (* sw: granite assembles the S immediate with [Zmod.app] *)
+    all: try (f_equal; f_equal; f_equal;
+              rewrite (bits.unsigned_app (n := 12 - 7) (m := 32 - 25)) by lia;
+              rewrite Z.lor_comm; reflexivity).
+    (* beq/bne: the B immediate *)
+    all: f_equal; f_equal; f_equal; apply b_imm_agree.
+  Qed.
 
   (* CSRs, traps, MPIE, mtvec, mie (granite#1, riscv-coq#61): the relation has
      no CSR component and the trap paths differ.  On this platform CSR accesses
